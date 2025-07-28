@@ -50,6 +50,12 @@ class DenseContrastiveViT(nn.Module):
         # Initialize weights
         self.init_weights()
 
+        print(f"------------------------------------------------------")
+        print(f"Model params are: ")
+        print(f"Model name: {self.model_name}")
+        print(f"Pretrained: {self.pretrained}")
+        print(f"------------------------------------------------------")
+
     def build_vit(self):
         if self.model_name == 'vit_tiny_patch16_224':
             return self.deit_tiny_patch16_224(self.pretrained)
