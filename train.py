@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder
+from datasets import load_dataset
 import os
 import time
 import logging
@@ -14,6 +15,8 @@ import argparse
 from typing import Dict, Tuple, Optional
 
 from dense_vit_model import DenseContrastiveViT, DenseContrastiveLoss
+from contrastive_image_dataset import ContrastiveImageDataset
+from sketch_imagenet_dataset_builder import ImageNetSketchDataset
 
 
 class AverageMeter:
@@ -104,10 +107,21 @@ class DenseContrastiveTrainer:
     def setup_data(self):
         """Setup data loaders"""
         # Data augmentation for training
-        train_transform = transforms.Compose([
+        train_transform1 = transforms.Compose([
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        train_transform2 = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=(0.2, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),  # Remove RandomApply wrapper
+            transforms.RandomApply([
+                transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 1.0))
+            ], p=0.2),  # Reduce both kernel size and probability
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -120,16 +134,42 @@ class DenseContrastiveTrainer:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        # Create datasets
-        train_dataset = ImageFolder(
+        # Create contrastive training dataset
+        train_dataset = ContrastiveImageDataset(
             root=os.path.join(self.config['data_path'], 'train'),
-            transform=train_transform
+            transform1=train_transform1,
+            transform2=train_transform2
         )
 
+        # Imagenet standard val dataloader
         val_dataset = ImageFolder(
             root=os.path.join(self.config['data_path'], 'val'),
             transform=val_transform
         )
+
+        # Stylized Imagenet val dataloader
+        stylized_imagenet_val_dataset = ImageFolder(
+            root=os.path.join(self.config['stylized_imagenet'], 'val'),
+            transform=val_transform
+        )
+
+        # Imagenet-sketch val dataset
+        sketch_IN_dataset = load_dataset("imagenet_sketch", split="train")
+        # Wrap it with the custom dataset
+        sketch_imagenet_val_dataset = ImageNetSketchDataset(sketch_IN_dataset, transform=val_transform)
+
+        # Imagenet A val dataloader
+        imagenet_A_val_dataset = ImageFolder(
+            root=os.path.join(self.config['imagenet_A']),
+            transform=val_transform
+        )
+
+        # Imagenet R val dataloader
+        imagenet_R_val_dataset = ImageFolder(
+            root=os.path.join(self.config['imagenet_R']),
+            transform=val_transform
+        )
+
 
         # Create data loaders
         self.train_loader = DataLoader(
@@ -141,6 +181,7 @@ class DenseContrastiveTrainer:
             drop_last=True
         )
 
+        # Imagenet standard val dataloader
         self.val_loader = DataLoader(
             val_dataset,
             batch_size=self.config['batch_size'],
@@ -149,8 +190,48 @@ class DenseContrastiveTrainer:
             pin_memory=True
         )
 
+        # Stylized Imagenet val dataloader
+        self.stylized_imagenet_val_loader = DataLoader(
+            stylized_imagenet_val_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=False,
+            num_workers=self.config['num_workers'],
+            pin_memory=True
+        )
+
+        # Sketch Imagenet val dataloader
+        self.sketch_imagenet_val_loader = DataLoader(
+            sketch_imagenet_val_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=False,
+            num_workers=self.config['num_workers'],
+            pin_memory=True
+        )
+
+        # Stylized Imagenet val dataloader
+        self.imagenet_A_val_loader = DataLoader(
+            imagenet_A_val_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=False,
+            num_workers=self.config['num_workers'],
+            pin_memory=True
+        )
+
+        # Stylized Imagenet val dataloader
+        self.imagenet_R_val_loader = DataLoader(
+            imagenet_R_val_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=False,
+            num_workers=self.config['num_workers'],
+            pin_memory=True
+        )
+
         self.logger.info(f"Train dataset size: {len(train_dataset)}")
         self.logger.info(f"Validation dataset size: {len(val_dataset)}")
+        self.logger.info(f"Stylized Imagenet Validation dataset size: {len(stylized_imagenet_val_dataset)}")
+        self.logger.info(f"Sketch Imagenet Validation dataset size: {len(sketch_imagenet_val_dataset)}")
+        self.logger.info(f"Imagenet_A Validation dataset size: {len(imagenet_A_val_dataset)}")
+        self.logger.info(f"Imagenet_R Validation dataset size: {len(imagenet_R_val_dataset)}")
 
     def setup_optimizer(self):
         """Setup optimizer and scheduler"""
@@ -193,6 +274,15 @@ class DenseContrastiveTrainer:
         # Loss weight
         self.lambda_weight = self.config.get('lambda_weight', 0.5)
 
+    def get_global_grad_norm(self):
+        total_norm = 0.0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.detach().data.norm(2)
+                total_norm += param_norm.item() ** 2
+        return total_norm ** 0.5
+
+
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Train one epoch"""
         self.model.train()
@@ -214,31 +304,40 @@ class DenseContrastiveTrainer:
             # Measure data loading time
             data_time.update(time.time() - end)
 
-            images = images.to(self.device, non_blocking=True)
+            images_1, images_2 = images[0], images[1]
+            images_1 = images_1.to(self.device, non_blocking=True)
+            images_2 = images_2.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
 
-            # Create two augmented views for contrastive learning
-            # For now, we'll use the same image twice - in practice, you'd want different augmentations
-            images_1 = images
-            images_2 = images  # TODO: Apply different augmentations
+            # images_1 = images
+            # images_2 = images
 
             # Forward pass
-            cls_output_1, dense_features_1, backbone_features_1 = self.model(images_1, return_dense=True)
-            cls_output_2, dense_features_2, backbone_features_2 = self.model(images_2, return_dense=True)
-            # cls_output_1.shape: [64, 1000], dense_features_1.shape: [64, 14, 14, 128]
-            # cls_output_2.shape: [64, 1000], dense_features_2.shape: [64, 14, 14, 128]
+            if self.lambda_weight > 0:
+
+                cls_output_1, dense_features_1, backbone_features_1 = self.model(images_1, return_dense=True)
+                cls_output_2, dense_features_2, backbone_features_2 = self.model(images_2, return_dense=True)
+                # cls_output_1.shape: [64, 1000], dense_features_1.shape: [64, 14, 14, 128]
+                # cls_output_2.shape: [64, 1000], dense_features_2.shape: [64, 14, 14, 128]
+
+                # Dense contrastive loss
+                # For correspondence, we use the dense features as backbone features
+                # In practice, you might want to use features from an earlier layer
+                dense_loss = self.dense_contrastive_criterion(
+                    dense_features_1, dense_features_2,
+                    backbone_features_1, backbone_features_2  # Using same features for correspondence
+                )
+            else:
+                # Skip dense computations entirely
+                cls_output_1 = self.model(images_1, return_dense=False)  # or just self.model(images_1)
+                cls_output_2 = self.model(images_2, return_dense=False)
+                dense_loss = 0
 
             # Classification loss (using both views)
             cls_loss = (self.classification_criterion(cls_output_1, targets) +
                         self.classification_criterion(cls_output_2, targets)) / 2
 
-            # Dense contrastive loss
-            # For correspondence, we use the dense features as backbone features
-            # In practice, you might want to use features from an earlier layer
-            dense_loss = self.dense_contrastive_criterion(
-                dense_features_1, dense_features_2,
-                backbone_features_1, backbone_features_2  # Using same features for correspondence
-            )
+
 
             # Total loss
             total_loss = (1 - self.lambda_weight) * cls_loss + self.lambda_weight * dense_loss
@@ -249,6 +348,7 @@ class DenseContrastiveTrainer:
 
             # Gradient clipping
             if self.config.get('grad_clip', 0) > 0:
+                grad_norm = self.get_global_grad_norm()
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
 
             self.optimizer.step()
@@ -257,11 +357,12 @@ class DenseContrastiveTrainer:
             acc1, acc5 = self.accuracy(cls_output_1, targets, topk=(1, 5))
 
             # Update metrics
-            losses.update(total_loss.item(), images.size(0))
-            cls_losses.update(cls_loss.item(), images.size(0))
-            dense_losses.update(dense_loss.item(), images.size(0))
-            top1.update(acc1[0], images.size(0))
-            top5.update(acc5[0], images.size(0))
+            losses.update(total_loss.item(), images[0].size(0))
+            cls_losses.update(cls_loss.item(), images[0].size(0))
+            if self.lambda_weight > 0:
+                dense_losses.update(dense_loss.item(), images[0].size(0))
+            top1.update(acc1[0], images[0].size(0))
+            top5.update(acc5[0], images[0].size(0))
 
             # Measure elapsed time
             batch_time.update(time.time() - end)
@@ -285,6 +386,7 @@ class DenseContrastiveTrainer:
                     'train/acc1': top1.avg,
                     'train/acc5': top5.avg,
                     'train/lr': self.optimizer.param_groups[0]['lr'],
+                    'train/grad_norm': grad_norm,
                     'epoch': epoch
                 })
 
@@ -296,7 +398,7 @@ class DenseContrastiveTrainer:
             'acc5': top5.avg
         }
 
-    def validate(self, epoch: int) -> Dict[str, float]:
+    def validate(self, epoch: int, data_loader: DataLoader) -> Dict[str, float]:
         """Validate the model"""
         self.model.eval()
 
@@ -305,7 +407,7 @@ class DenseContrastiveTrainer:
         top5 = AverageMeter('Acc@5', ':6.2f')
 
         with torch.no_grad():
-            pbar = tqdm(self.val_loader, desc='Validation')
+            pbar = tqdm(data_loader, desc='Validation')
 
             for i, (images, targets) in enumerate(pbar):
                 images = images.to(self.device, non_blocking=True)
@@ -365,7 +467,7 @@ class DenseContrastiveTrainer:
         }
 
         # Save latest checkpoint
-        checkpoint_path = Path(self.config['save_dir']) / 'checkpoint_latest.pth'
+        checkpoint_path = Path(self.config['save_dir']) / f'checkpoint_{epoch}.pth'
         torch.save(checkpoint, checkpoint_path)
 
         # Save best checkpoint
@@ -381,11 +483,61 @@ class DenseContrastiveTrainer:
         for epoch in range(1, self.config['epochs'] + 1):
             self.logger.info(f"Epoch {epoch}/{self.config['epochs']}")
 
+            if epoch == 1:
+                val_metrics = self.validate(0, self.val_loader)
+                stylized_imagenet_val_metrics = self.validate(epoch, self.stylized_imagenet_val_loader)
+                sketch_imagenet_val_metrics = self.validate(epoch, self.sketch_imagenet_val_loader)
+                imagenet_A_val_metrics = self.validate(epoch, self.imagenet_A_val_loader)
+                imagenet_R_val_metrics = self.validate(epoch, self.imagenet_R_val_loader)
+
+                self.logger.info(
+                    f"Val - Loss: {val_metrics['loss']:.4f}, "
+                    f"Acc@1: {val_metrics['acc1']:.2f}, "
+                    f"Acc@5: {val_metrics['acc5']:.2f}, "
+                    f"Stylized IN Val - Loss: {stylized_imagenet_val_metrics['loss']:.4f}, "
+                    f"Stylized IN Acc@1: {stylized_imagenet_val_metrics['acc1']:.2f}, "
+                    f"Stylized IN Acc@5: {stylized_imagenet_val_metrics['acc5']:.2f}, "
+                    f"Sketch IN Val - Loss: {sketch_imagenet_val_metrics['loss']:.4f}, "
+                    f"Sketch IN Acc@1: {sketch_imagenet_val_metrics['acc1']:.2f}, "
+                    f"Sketch IN Acc@5: {sketch_imagenet_val_metrics['acc5']:.2f}, "
+                    f"Imagenet_A Val - Loss: {imagenet_A_val_metrics['loss']:.4f}, "
+                    f"Imagenet_A Acc@1: {imagenet_A_val_metrics['acc1']:.2f}, "
+                    f"Imagenet_A Acc@5: {imagenet_A_val_metrics['acc5']:.2f}, "
+                    f"Imagenet_R Val - Loss: {imagenet_R_val_metrics['loss']:.4f}, "
+                    f"Imagenet_R Acc@1: {imagenet_R_val_metrics['acc1']:.2f}, "
+                    f"Imagenet_R Acc@5: {imagenet_R_val_metrics['acc5']:.2f}"
+                )
+
+                # Log to wandb
+                if self.config.get('use_wandb', False):
+                    wandb.log({
+                        'val/loss': val_metrics['loss'],
+                        'val/acc1': val_metrics['acc1'],
+                        'val/acc5': val_metrics['acc5'],
+                        'stylized_IN_val/loss': stylized_imagenet_val_metrics['loss'],
+                        'stylized_IN_val/acc1': stylized_imagenet_val_metrics['acc1'],
+                        'stylized_IN_val/acc5': stylized_imagenet_val_metrics['acc5'],
+                        'sketch_IN_val/loss': sketch_imagenet_val_metrics['loss'],
+                        'sketch_IN_val/acc1': sketch_imagenet_val_metrics['acc1'],
+                        'sketch_IN_val/acc5': sketch_imagenet_val_metrics['acc5'],
+                        'imagenet_A/loss': imagenet_A_val_metrics['loss'],
+                        'imagenet_A/acc1': imagenet_A_val_metrics['acc1'],
+                        'imagenet_A/acc5': imagenet_A_val_metrics['acc5'],
+                        'imagenet_R/loss': imagenet_R_val_metrics['loss'],
+                        'imagenet_R/acc1': imagenet_R_val_metrics['acc1'],
+                        'imagenet_R/acc5': imagenet_R_val_metrics['acc5'],
+                        'epoch': epoch
+                    })
+
             # Training
             train_metrics = self.train_epoch(epoch)
 
             # Validation
-            val_metrics = self.validate(epoch)
+            val_metrics = self.validate(epoch, self.val_loader)
+            stylized_imagenet_val_metrics = self.validate(epoch, self.stylized_imagenet_val_loader)
+            sketch_imagenet_val_metrics = self.validate(epoch, self.sketch_imagenet_val_loader)
+            imagenet_A_val_metrics = self.validate(epoch, self.imagenet_A_val_loader)
+            imagenet_R_val_metrics = self.validate(epoch, self.imagenet_R_val_loader)
 
             # Update scheduler
             if epoch <= self.warmup_epochs:
@@ -402,7 +554,19 @@ class DenseContrastiveTrainer:
             self.logger.info(
                 f"Val - Loss: {val_metrics['loss']:.4f}, "
                 f"Acc@1: {val_metrics['acc1']:.2f}, "
-                f"Acc@5: {val_metrics['acc5']:.2f}"
+                f"Acc@5: {val_metrics['acc5']:.2f}, "
+                f"Stylized IN Val - Loss: {stylized_imagenet_val_metrics['loss']:.4f}, "
+                f"Stylized IN Acc@1: {stylized_imagenet_val_metrics['acc1']:.2f}, "
+                f"Stylized IN Acc@5: {stylized_imagenet_val_metrics['acc5']:.2f}, "
+                f"Sketch IN Val - Loss: {sketch_imagenet_val_metrics['loss']:.4f}, "
+                f"Sketch IN Acc@1: {sketch_imagenet_val_metrics['acc1']:.2f}, "
+                f"Sketch IN Acc@5: {sketch_imagenet_val_metrics['acc5']:.2f}, "
+                f"Imagenet_A Val - Loss: {imagenet_A_val_metrics['loss']:.4f}, "
+                f"Imagenet_A Acc@1: {imagenet_A_val_metrics['acc1']:.2f}, "
+                f"Imagenet_A Acc@5: {imagenet_A_val_metrics['acc5']:.2f}, "
+                f"Imagenet_R Val - Loss: {imagenet_R_val_metrics['loss']:.4f}, "
+                f"Imagenet_R Acc@1: {imagenet_R_val_metrics['acc1']:.2f}, "
+                f"Imagenet_R Acc@5: {imagenet_R_val_metrics['acc5']:.2f}"
             )
 
             # Log to wandb
@@ -411,6 +575,18 @@ class DenseContrastiveTrainer:
                     'val/loss': val_metrics['loss'],
                     'val/acc1': val_metrics['acc1'],
                     'val/acc5': val_metrics['acc5'],
+                    'stylized_IN_val/loss': stylized_imagenet_val_metrics['loss'],
+                    'stylized_IN_val/acc1': stylized_imagenet_val_metrics['acc1'],
+                    'stylized_IN_val/acc5': stylized_imagenet_val_metrics['acc5'],
+                    'sketch_IN_val/loss': sketch_imagenet_val_metrics['loss'],
+                    'sketch_IN_val/acc1': sketch_imagenet_val_metrics['acc1'],
+                    'sketch_IN_val/acc5': sketch_imagenet_val_metrics['acc5'],
+                    'imagenet_A/loss': imagenet_A_val_metrics['loss'],
+                    'imagenet_A/acc1': imagenet_A_val_metrics['acc1'],
+                    'imagenet_A/acc5': imagenet_A_val_metrics['acc5'],
+                    'imagenet_R/loss': imagenet_R_val_metrics['loss'],
+                    'imagenet_R/acc1': imagenet_R_val_metrics['acc1'],
+                    'imagenet_R/acc5': imagenet_R_val_metrics['acc5'],
                     'epoch': epoch
                 })
 
@@ -435,14 +611,24 @@ class DenseContrastiveTrainer:
 # Example training script
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train Dense Contrastive ViT')
-    parser.add_argument('--imagenet-train', type=str,
+    parser.add_argument('--imagenet', type=str,
                         default='/home/cognition/datasets/IMAGENET/imagenet_ILSVRC-2012_ImageNet-1K',
                         help='Path to ImageNet validation set')
+    parser.add_argument('--stylized-imagenet', type=str,
+                        default='/home/cognition/datasets/stylized_imagenet',
+                        help='Path to Stylized ImageNet validation set')
+    parser.add_argument('--imagenet_A', type=str,
+                        default='/home/cognition/datasets/imagenet-a',
+                        help='Path to ImageNet_A validation set')
+    parser.add_argument('--imagenet_R', type=str,
+                        default='/home/cognition/datasets/imagenet-r',
+                        help='Path to ImageNet_R validation set')
     parser.add_argument('--model-name', type=str, default='vit_tiny_patch16_224', help='Model architecture')
     parser.add_argument('--num-classes', type=int, default=1000, help='Number of classes')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for evaluation')
-    parser.add_argument('--num-workers', type=int, default=4, help='Number of workers for data loading')
+    parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
     parser.add_argument('--ckpt-dir', type=str, default='./models', help='Directory to save results')
     parser.add_argument('--pretrained', type=bool, required=False, default=True,
                         help='If to use deit pretrained weights')
@@ -453,18 +639,22 @@ if __name__ == "__main__":
         'model_name': args.model_name,
         'num_classes': args.num_classes,
         'dense_dim': 128,
-        'data_path': args.imagenet_train,  # Update this path
+        'data_path': args.imagenet,  # Update this path
+        'stylized_imagenet': args.stylized_imagenet,
+        'imagenet_A': args.imagenet_A,
+        'imagenet_R': args.imagenet_R,
         'save_dir': args.ckpt_dir,
         'batch_size': args.batch_size,
         'epochs': args.epochs,
-        'learning_rate': 1e-3,
+        'learning_rate': 1e-5,
         'weight_decay': 0.05,
         'warmup_epochs': 5,
         'drop_rate': 0.0,
         'drop_path_rate': 0.1,
         'num_workers': args.num_workers,
-        'grad_clip': 1.0,
-        'lambda_weight': 0.5,
+        'grad_clip': 5.0,
+        'lambda_weight': args.lambda_weight,
+        'pretrained': args.pretrained,
         'temperature': 0.2,
         'queue_size': 1000,
         'momentum': 0.999,
