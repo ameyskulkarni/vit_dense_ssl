@@ -617,13 +617,14 @@ if __name__ == "__main__":
     parser.add_argument('--stylized-imagenet', type=str,
                         default='/home/cognition/datasets/stylized_imagenet',
                         help='Path to Stylized ImageNet validation set')
-    parser.add_argument('--imagenet_A', type=str,
+    parser.add_argument('--imagenet-A', type=str,
                         default='/home/cognition/datasets/imagenet-a',
                         help='Path to ImageNet_A validation set')
-    parser.add_argument('--imagenet_R', type=str,
+    parser.add_argument('--imagenet-R', type=str,
                         default='/home/cognition/datasets/imagenet-r',
                         help='Path to ImageNet_R validation set')
     parser.add_argument('--model-name', type=str, default='vit_tiny_patch16_224', help='Model architecture')
+    parser.add_argument('--experiment-name', type=str, default='dense_vit_tiny_baseline1', help='WANDB experiment name')
     parser.add_argument('--num-classes', type=int, default=1000, help='Number of classes')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for evaluation')
     parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
@@ -660,7 +661,7 @@ if __name__ == "__main__":
         'momentum': 0.999,
         'use_wandb': True,
         'wandb_project': 'dense-contrastive-vit',
-        'experiment_name': 'dense_vit_tiny_baseline',
+        'experiment_name': args.experiment_name,
         'log_interval': 100
     }
 
