@@ -100,7 +100,7 @@ class DenseContrastiveTrainer:
         self.logger.info(f"Model created with {self.model.get_num_params():,} parameters")
 
         # Enable DataParallel if multiple GPUs available
-        if torch.cuda.device_count() > 1:
+        if torch.cuda.device_count() > 1 and self.config.get('model_parallel', False):
             self.model = nn.DataParallel(self.model)
             self.logger.info(f"Using {torch.cuda.device_count()} GPUs")
 
@@ -631,8 +631,8 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
     parser.add_argument('--ckpt-dir', type=str, default='./models', help='Directory to save results')
-    parser.add_argument('--pretrained', type=bool, required=False, default=True,
-                        help='If to use deit pretrained weights')
+    parser.add_argument('--pretrained', type=bool, required=False, default=True, help='If to use deit pretrained weights')
+    parser.add_argument('--model-parallel', type=bool, required=False, default=False, help='If to parallelize the model across GPUs')
 
     args = parser.parse_args()
     # Configuration
@@ -662,7 +662,8 @@ if __name__ == "__main__":
         'use_wandb': True,
         'wandb_project': 'dense-contrastive-vit',
         'experiment_name': args.experiment_name,
-        'log_interval': 100
+        'log_interval': 100,
+        'model_parallel': args.model_parallel,
     }
 
     # Create trainer and start training
