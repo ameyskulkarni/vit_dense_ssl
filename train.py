@@ -904,6 +904,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
     parser.add_argument('--grad-clip', type=float, default=5, help='At what value to clip and scale the gradients')
+    parser.add_argument('--learning-rate', type=float, default=0.00001, help='Learning rate')
     parser.add_argument('--ckpt-dir', type=str, default='./models', help='Directory to save results')
     parser.add_argument('--pretrained', type=bool, required=False, default=True, help='If to use deit pretrained weights')
     parser.add_argument('--model-parallel', type=bool, required=False, default=False, help='If to parallelize the model across GPUs')
@@ -923,7 +924,7 @@ if __name__ == "__main__":
         'save_dir': args.ckpt_dir,
         'batch_size': args.batch_size,
         'epochs': args.epochs,
-        'learning_rate': 1e-5,
+        'learning_rate': args.learning_rate,
         'weight_decay': 0.05,
         'warmup_epochs': 5,
         'drop_rate': 0.0,
