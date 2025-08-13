@@ -14,9 +14,13 @@ from tqdm import tqdm
 import argparse
 from typing import Dict, Tuple, Optional
 
-from dense_vit_model import DenseContrastiveViT, DenseContrastiveLoss
+from dense_contrastive_vit_model import DenseContrastiveViT
+from dense_contrastive_loss import DenseContrastiveLoss
 from contrastive_image_dataset import ContrastiveImageDataset
 from sketch_imagenet_dataset_builder import ImageNetSketchDataset
+from dataset_class_matching import ImageNetV2Dataset, ImageNetADataset, ImageNetRDataset
+from compute_similarity_stats import compute_similarity_stats
+from compute_feature_collapse import compute_feature_rank, track_weight_changes
 
 
 class AverageMeter:
@@ -53,14 +57,17 @@ class DenseContrastiveTrainer:
         self.setup_data()
         self.setup_optimizer()
         self.setup_criterion()
-
         # Initialize wandb if enabled
-        if config.get('use_wandb', False):
+        self.init_wandb()
+
+    def init_wandb(self):
+        if self.config.get('use_wandb', False):
             wandb.init(
-                project=config.get('wandb_project', 'dense-contrastive-vit'),
-                config=config,
-                name=config.get('experiment_name', 'dense_vit_tiny_baseline')
+                project=self.config.get('wandb_project', 'dense-contrastive-vit'),
+                config=self.config,
+                name=self.config.get('experiment_name', 'dense_vit_tiny_baseline')
             )
+            # self.wandb_log_data = {}
 
     def setup_logging(self):
         """Setup logging configuration"""
@@ -146,6 +153,12 @@ class DenseContrastiveTrainer:
             root=os.path.join(self.config['data_path'], 'val'),
             transform=val_transform
         )
+        val_data_class_name_idx_mapping = val_dataset.class_to_idx
+
+        # Write to file
+        # with open('/home/cognition/projects/vit_dense_ssl/imagenet_to_imagefolder.txt', 'w') as f:
+        #     for class_name, class_idx in val_dataset.class_to_idx.items():
+        #         f.write(f"{class_idx}\t{class_name}\n")
 
         # Stylized Imagenet val dataloader
         stylized_imagenet_val_dataset = ImageFolder(
@@ -159,14 +172,33 @@ class DenseContrastiveTrainer:
         sketch_imagenet_val_dataset = ImageNetSketchDataset(sketch_IN_dataset, transform=val_transform)
 
         # Imagenet A val dataloader
-        imagenet_A_val_dataset = ImageFolder(
+        imagenet_A_val_dataset = ImageNetADataset(
             root=os.path.join(self.config['imagenet_A']),
+            mapping=val_data_class_name_idx_mapping,
             transform=val_transform
         )
 
         # Imagenet R val dataloader
-        imagenet_R_val_dataset = ImageFolder(
+        imagenet_R_val_dataset = ImageNetRDataset(
             root=os.path.join(self.config['imagenet_R']),
+            mapping=val_data_class_name_idx_mapping,
+            transform=val_transform
+        )
+
+        # Imagenet v2 val datasets
+        # ImageNet-v2 variants (distribution shift robustness)
+        imagenet_v2_matched_freq_dataset = ImageNetV2Dataset(
+            root=os.path.join(self.config['imagenet_v2'], 'imagenetv2-matched-frequency'),
+            transform=val_transform
+        )
+
+        imagenet_v2_threshold_dataset = ImageNetV2Dataset(
+            root=os.path.join(self.config['imagenet_v2'], 'imagenetv2-threshold0.7'),
+            transform=val_transform
+        )
+
+        imagenet_v2_top_images_dataset = ImageNetV2Dataset(
+            root=os.path.join(self.config['imagenet_v2'], 'imagenetv2-top-images'),
             transform=val_transform
         )
 
@@ -184,7 +216,7 @@ class DenseContrastiveTrainer:
         # Imagenet standard val dataloader
         self.val_loader = DataLoader(
             val_dataset,
-            batch_size=self.config['batch_size'],
+            batch_size= 3 * self.config['batch_size'],
             shuffle=False,
             num_workers=self.config['num_workers'],
             pin_memory=True
@@ -193,7 +225,7 @@ class DenseContrastiveTrainer:
         # Stylized Imagenet val dataloader
         self.stylized_imagenet_val_loader = DataLoader(
             stylized_imagenet_val_dataset,
-            batch_size=self.config['batch_size'],
+            batch_size= 3 * self.config['batch_size'],
             shuffle=False,
             num_workers=self.config['num_workers'],
             pin_memory=True
@@ -202,7 +234,7 @@ class DenseContrastiveTrainer:
         # Sketch Imagenet val dataloader
         self.sketch_imagenet_val_loader = DataLoader(
             sketch_imagenet_val_dataset,
-            batch_size=self.config['batch_size'],
+            batch_size= 3 * self.config['batch_size'],
             shuffle=False,
             num_workers=self.config['num_workers'],
             pin_memory=True
@@ -211,7 +243,7 @@ class DenseContrastiveTrainer:
         # Stylized Imagenet val dataloader
         self.imagenet_A_val_loader = DataLoader(
             imagenet_A_val_dataset,
-            batch_size=self.config['batch_size'],
+            batch_size= 3 * self.config['batch_size'],
             shuffle=False,
             num_workers=self.config['num_workers'],
             pin_memory=True
@@ -220,7 +252,32 @@ class DenseContrastiveTrainer:
         # Stylized Imagenet val dataloader
         self.imagenet_R_val_loader = DataLoader(
             imagenet_R_val_dataset,
-            batch_size=self.config['batch_size'],
+            batch_size= 3 * self.config['batch_size'],
+            shuffle=False,
+            num_workers=self.config['num_workers'],
+            pin_memory=True
+        )
+
+        # ImageNet-V2 variant loaders
+        self.imagenet_v2_matched_freq_loader = DataLoader(
+            imagenet_v2_matched_freq_dataset,
+            batch_size= 3 * self.config['batch_size'],
+            shuffle=False,
+            num_workers=self.config['num_workers'],
+            pin_memory=True
+        )
+
+        self.imagenet_v2_threshold_loader = DataLoader(
+            imagenet_v2_threshold_dataset,
+            batch_size= 3 * self.config['batch_size'],
+            shuffle=False,
+            num_workers=self.config['num_workers'],
+            pin_memory=True
+        )
+
+        self.imagenet_v2_top_images_loader = DataLoader(
+            imagenet_v2_top_images_dataset,
+            batch_size= 3 * self.config['batch_size'],
             shuffle=False,
             num_workers=self.config['num_workers'],
             pin_memory=True
@@ -232,6 +289,9 @@ class DenseContrastiveTrainer:
         self.logger.info(f"Sketch Imagenet Validation dataset size: {len(sketch_imagenet_val_dataset)}")
         self.logger.info(f"Imagenet_A Validation dataset size: {len(imagenet_A_val_dataset)}")
         self.logger.info(f"Imagenet_R Validation dataset size: {len(imagenet_R_val_dataset)}")
+        self.logger.info(f"Imagenet_v2_matched_freq dataset size: {len(imagenet_v2_matched_freq_dataset)}")
+        self.logger.info(f"Imagenet_v2_threshold dataset size: {len(imagenet_v2_threshold_dataset)}")
+        self.logger.info(f"Imagenet_v2_top_images dataset size: {len(imagenet_v2_top_images_dataset)}")
 
     def setup_optimizer(self):
         """Setup optimizer and scheduler"""
@@ -301,6 +361,8 @@ class DenseContrastiveTrainer:
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch}')
 
         for i, (images, targets) in enumerate(pbar):
+            self.prev_dense_weights = {}
+            training_analysis_metric = {}
             # Measure data loading time
             data_time.update(time.time() - end)
 
@@ -308,9 +370,6 @@ class DenseContrastiveTrainer:
             images_1 = images_1.to(self.device, non_blocking=True)
             images_2 = images_2.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
-
-            # images_1 = images
-            # images_2 = images
 
             # Forward pass
             if self.lambda_weight > 0:
@@ -323,10 +382,21 @@ class DenseContrastiveTrainer:
                 # Dense contrastive loss
                 # For correspondence, we use the dense features as backbone features
                 # In practice, you might want to use features from an earlier layer
-                dense_loss = self.dense_contrastive_criterion(
+                dense_loss, pos_sim, neg_sim = self.dense_contrastive_criterion(
                     dense_features_1, dense_features_2,
                     backbone_features_1, backbone_features_2  # Using same features for correspondence
                 )
+                if i % 10 == 0:
+                    sim_stats = compute_similarity_stats(pos_sim, neg_sim)
+                    effective_rank1, eigenvals1 = compute_feature_rank(dense_features_1)
+                    effective_rank2, eigenvals2 = compute_feature_rank(dense_features_2)
+                    weight_changes, self.prev_dense_weights = track_weight_changes(self.model, self.prev_dense_weights)
+                    training_analysis_metric.update(sim_stats)
+                    training_analysis_metric.update(weight_changes)
+                    training_analysis_metric['feature_collapse/effective_rank1'] = effective_rank1
+                    training_analysis_metric['feature_collapse/eigenvals1'] = eigenvals1
+                    training_analysis_metric['feature_collapse/effective_rank2'] = effective_rank2
+                    training_analysis_metric['feature_collapse/eigenvals2'] = eigenvals2
             else:
                 # Skip dense computations entirely
                 cls_output_1 = self.model(images_1, return_dense=False)  # or just self.model(images_1)
@@ -346,10 +416,26 @@ class DenseContrastiveTrainer:
             self.optimizer.zero_grad()
             total_loss.backward()
 
+            # Logging dense head gradients.
+            if i % 10 == 0:
+                for name, param in self.model.dense_projection_head.named_parameters():
+                    if param.grad is not None:
+                        training_analysis_metric[f'gradients/before_clip_dense_head_{name}_norm'] = param.grad.detach().data.norm(2)
+                        training_analysis_metric[f'gradients/before_clip_dense_head_{name}_mean'] = param.grad.detach().data.mean()
+                        training_analysis_metric[f'gradients/before_clip_dense_head_{name}_std'] = param.grad.detach().data.std()
+
             # Gradient clipping
             if self.config.get('grad_clip', 0) > 0:
                 grad_norm = self.get_global_grad_norm()
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
+
+            # Logging dense head gradients after gradient clipping.
+            if i % 10 == 0:
+                for name, param in self.model.dense_projection_head.named_parameters():
+                    if param.grad is not None:
+                        training_analysis_metric[f'gradients/after_clip_dense_head_{name}_norm'] = param.grad.detach().data.norm(2)
+                        training_analysis_metric[f'gradients/after_clip_dense_head_{name}_mean'] = param.grad.detach().data.mean()
+                        training_analysis_metric[f'gradients/after_clip_dense_head_{name}_std'] = param.grad.detach().data.std()
 
             self.optimizer.step()
 
@@ -389,6 +475,8 @@ class DenseContrastiveTrainer:
                     'train/grad_norm': grad_norm,
                     'epoch': epoch
                 })
+                if i % 10 == 0:
+                    wandb.log(training_analysis_metric)
 
         return {
             'loss': losses.avg,
@@ -415,6 +503,7 @@ class DenseContrastiveTrainer:
 
                 # Forward pass (no dense features for validation)
                 cls_output = self.model(images, return_dense=False)
+                # print(f"cls_output: {cls_output}/ targets: {targets}")
 
                 # Classification loss
                 loss = self.classification_criterion(cls_output, targets)
@@ -437,6 +526,93 @@ class DenseContrastiveTrainer:
             'loss': losses.avg,
             'acc1': top1.avg,
             'acc5': top5.avg
+        }
+
+    def validate_imagenet_c_by_corruption(self, epoch: int) -> Dict[str, Dict[str, float]]:
+        """
+        Validate on ImageNet-C broken down by corruption type and severity
+        Requires ImageNet-C to be organized as: corruption_type/severity_level/class_folders/
+        """
+        corruption_results = {}
+
+        corruption_types = [
+            'gaussian_noise', 'shot_noise', 'impulse_noise', 'defocus_blur', 'glass_blur',
+            'motion_blur', 'zoom_blur', 'snow', 'frost', 'fog', 'brightness', 'contrast',
+            'elastic_transform', 'pixelate', 'jpeg_compression'
+        ]
+
+        for corruption in corruption_types:
+            corruption_results[corruption] = {}
+
+            for severity in range(1, 6):  # ImageNet-C has 5 severity levels
+                corruption_path = os.path.join(
+                    self.config['imagenet_C'],
+                    corruption,
+                    str(severity)
+                )
+
+                if os.path.exists(corruption_path):
+                    # Create dataset for this specific corruption and severity
+                    corruption_dataset = ImageFolder(
+                        root=corruption_path,
+                        transform=transforms.Compose([
+                            transforms.Resize(256),
+                            transforms.CenterCrop(224),
+                            transforms.ToTensor(),
+                            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                        ])
+                    )
+
+                    corruption_loader = DataLoader(
+                        corruption_dataset,
+                        batch_size= 3 * self.config['batch_size'],
+                        shuffle=False,
+                        num_workers=self.config['num_workers'],
+                        pin_memory=True
+                    )
+
+                    # Validate on this corruption/severity combination
+                    result = self.validate(epoch, corruption_loader)
+                    corruption_results[corruption][f'severity_{severity}'] = result
+
+        return corruption_results
+
+    def calculate_imagenet_c_metrics(self, corruption_results: Dict) -> Dict[str, float]:
+        """
+        Calculate standard ImageNet-C metrics: mCE (mean Corruption Error) and relative mCE
+        """
+        # AlexNet error rates for each corruption type (used as baseline for mCE calculation)
+        alexnet_err = {
+            'gaussian_noise': 0.886, 'shot_noise': 0.894, 'impulse_noise': 0.922,
+            'defocus_blur': 0.819, 'glass_blur': 0.826, 'motion_blur': 0.785,
+            'zoom_blur': 0.798, 'snow': 0.866, 'frost': 0.826, 'fog': 0.819,
+            'brightness': 0.564, 'contrast': 0.853, 'elastic_transform': 0.646,
+            'pixelate': 0.717, 'jpeg_compression': 0.606
+        }
+
+        ce_scores = []
+        average_ce_per_corruption = {}
+
+        for corruption_type, severities in corruption_results.items():
+            if corruption_type in alexnet_err:
+                # Calculate average error across all severities for this corruption
+                corruption_errors = []
+                for severity_key, result in severities.items():
+                    error_rate = 1.0 - (result['acc1'] / 100.0)  # Convert accuracy to error rate
+                    corruption_errors.append(error_rate)
+
+                if corruption_errors:
+                    avg_error = sum(corruption_errors) / len(corruption_errors)
+                    average_ce_per_corruption[corruption_type] = avg_error
+                    ce_score = avg_error / alexnet_err[corruption_type]
+                    ce_scores.append(ce_score)
+
+        mce = sum(ce_scores) / len(ce_scores) if ce_scores else 0.0
+
+        return {
+            'average_ce_per_corruption': average_ce_per_corruption,
+            'mCE': mce,
+            'mCE_percent': mce * 100
         }
 
     def accuracy(self, output, target, topk=(1,)):
@@ -489,6 +665,13 @@ class DenseContrastiveTrainer:
                 sketch_imagenet_val_metrics = self.validate(epoch, self.sketch_imagenet_val_loader)
                 imagenet_A_val_metrics = self.validate(epoch, self.imagenet_A_val_loader)
                 imagenet_R_val_metrics = self.validate(epoch, self.imagenet_R_val_loader)
+                # ImageNet-v2 variants
+                imagenet_v2_matched_freq_metrics = self.validate(epoch, self.imagenet_v2_matched_freq_loader)
+                imagenet_v2_threshold_metrics = self.validate(epoch, self.imagenet_v2_threshold_loader)
+                imagenet_v2_top_images_metrics = self.validate(epoch, self.imagenet_v2_top_images_loader)
+                # Imagenet C
+                # imagenet_C_corruption_results = self.validate_imagenet_c_by_corruption(epoch)
+                # imagenet_C_metrics = self.calculate_imagenet_c_metrics(imagenet_C_corruption_results)
 
                 self.logger.info(
                     f"Val - Loss: {val_metrics['loss']:.4f}, "
@@ -505,15 +688,35 @@ class DenseContrastiveTrainer:
                     f"Imagenet_A Acc@5: {imagenet_A_val_metrics['acc5']:.2f}, "
                     f"Imagenet_R Val - Loss: {imagenet_R_val_metrics['loss']:.4f}, "
                     f"Imagenet_R Acc@1: {imagenet_R_val_metrics['acc1']:.2f}, "
-                    f"Imagenet_R Acc@5: {imagenet_R_val_metrics['acc5']:.2f}"
+                    f"Imagenet_R Acc@5: {imagenet_R_val_metrics['acc5']:.2f},"
+                    f"Imagenet_v2 matched_freq Val - Loss: {imagenet_v2_matched_freq_metrics['loss']:.4f}, "
+                    f"Imagenet_v2 matched_freq Acc@1: {imagenet_v2_matched_freq_metrics['acc1']:.2f}, "
+                    f"Imagenet_v2 matched_freq Acc@5: {imagenet_v2_matched_freq_metrics['acc5']:.2f},"
+                    f"Imagenet_v2 threshold_metrics Val - Loss: {imagenet_v2_threshold_metrics['loss']:.4f}, "
+                    f"Imagenet_v2 threshold_metrics Acc@1: {imagenet_v2_threshold_metrics['acc1']:.2f}, "
+                    f"Imagenet_v2 threshold_metrics Acc@5: {imagenet_v2_threshold_metrics['acc5']:.2f},"
+                    f"Imagenet_v2 top_images Val - Loss: {imagenet_v2_top_images_metrics['loss']:.4f}, "
+                    f"Imagenet_v2 top_images Acc@1: {imagenet_v2_top_images_metrics['acc1']:.2f}, "
+                    f"Imagenet_v2 top_images Acc@5: {imagenet_v2_top_images_metrics['acc5']:.2f},"
                 )
+                # # Imagenet C metrics
+                # for metric, metric_value in imagenet_C_metrics.items():
+                #     if isinstance(metric_value, dict):
+                #         for k, v in metric_value.items():
+                #             self.logger.info(
+                #                 f"Imagenet_C corruption: {k}: {v:.4f}"
+                #             )
+                #     else:
+                #         self.logger.info(
+                #             f"Imagenet_C {metric}: {metric_value:.4f}"
+                #         )
 
                 # Log to wandb
                 if self.config.get('use_wandb', False):
                     wandb.log({
-                        'val/loss': val_metrics['loss'],
-                        'val/acc1': val_metrics['acc1'],
-                        'val/acc5': val_metrics['acc5'],
+                        'imagenet_val/loss': val_metrics['loss'],
+                        'imagenet_val/acc1': val_metrics['acc1'],
+                        'imagenet_val/acc5': val_metrics['acc5'],
                         'stylized_IN_val/loss': stylized_imagenet_val_metrics['loss'],
                         'stylized_IN_val/acc1': stylized_imagenet_val_metrics['acc1'],
                         'stylized_IN_val/acc5': stylized_imagenet_val_metrics['acc5'],
@@ -526,8 +729,26 @@ class DenseContrastiveTrainer:
                         'imagenet_R/loss': imagenet_R_val_metrics['loss'],
                         'imagenet_R/acc1': imagenet_R_val_metrics['acc1'],
                         'imagenet_R/acc5': imagenet_R_val_metrics['acc5'],
+                        'imagenet_v2_matched_freq/loss': imagenet_v2_matched_freq_metrics['loss'],
+                        'imagenet_v2_matched_freq/acc1': imagenet_v2_matched_freq_metrics['acc1'],
+                        'imagenet_v2_matched_freq/acc5': imagenet_v2_matched_freq_metrics['acc5'],
+                        'imagenet_v2_threshold/loss': imagenet_v2_threshold_metrics['loss'],
+                        'imagenet_v2_threshold/acc1': imagenet_v2_threshold_metrics['acc1'],
+                        'imagenet_v2_threshold/acc5': imagenet_v2_threshold_metrics['acc5'],
+                        'imagenet_v2_top_images/loss': imagenet_v2_top_images_metrics['loss'],
+                        'imagenet_v2_top_images/acc1': imagenet_v2_top_images_metrics['acc1'],
+                        'imagenet_v2_top_images/acc5': imagenet_v2_top_images_metrics['acc5'],
                         'epoch': epoch
                     })
+                    # # Imagenet C metrics
+                    # imagenet_C_metrics_to_log = {}
+                    # for metric, metric_value in imagenet_C_metrics.items():
+                    #     if isinstance(metric_value, dict):
+                    #         for k, v in metric_value.items():
+                    #             imagenet_C_metrics_to_log['imagenet_C/' + k] = v
+                    #     else:
+                    #         imagenet_C_metrics_to_log['imagenet_C/' + metric] = metric_value
+                    # wandb.log(imagenet_C_metrics_to_log)
 
             # Training
             train_metrics = self.train_epoch(epoch)
@@ -538,6 +759,13 @@ class DenseContrastiveTrainer:
             sketch_imagenet_val_metrics = self.validate(epoch, self.sketch_imagenet_val_loader)
             imagenet_A_val_metrics = self.validate(epoch, self.imagenet_A_val_loader)
             imagenet_R_val_metrics = self.validate(epoch, self.imagenet_R_val_loader)
+            # ImageNet-v2 variants
+            imagenet_v2_matched_freq_metrics = self.validate(epoch, self.imagenet_v2_matched_freq_loader)
+            imagenet_v2_threshold_metrics = self.validate(epoch, self.imagenet_v2_threshold_loader)
+            imagenet_v2_top_images_metrics = self.validate(epoch, self.imagenet_v2_top_images_loader)
+            # Imagenet C
+            # imagenet_C_corruption_results = self.validate_imagenet_c_by_corruption(epoch)
+            # imagenet_C_metrics = self.calculate_imagenet_c_metrics(imagenet_C_corruption_results)
 
             # Update scheduler
             if epoch <= self.warmup_epochs:
@@ -566,15 +794,36 @@ class DenseContrastiveTrainer:
                 f"Imagenet_A Acc@5: {imagenet_A_val_metrics['acc5']:.2f}, "
                 f"Imagenet_R Val - Loss: {imagenet_R_val_metrics['loss']:.4f}, "
                 f"Imagenet_R Acc@1: {imagenet_R_val_metrics['acc1']:.2f}, "
-                f"Imagenet_R Acc@5: {imagenet_R_val_metrics['acc5']:.2f}"
+                f"Imagenet_R Acc@5: {imagenet_R_val_metrics['acc5']:.2f},"
+                f"Imagenet_v2 matched_freq Val - Loss: {imagenet_v2_matched_freq_metrics['loss']:.4f}, "
+                f"Imagenet_v2 matched_freq Acc@1: {imagenet_v2_matched_freq_metrics['acc1']:.2f}, "
+                f"Imagenet_v2 matched_freq Acc@5: {imagenet_v2_matched_freq_metrics['acc5']:.2f},"
+                f"Imagenet_v2 threshold_metrics Val - Loss: {imagenet_v2_threshold_metrics['loss']:.4f}, "
+                f"Imagenet_v2 threshold_metrics Acc@1: {imagenet_v2_threshold_metrics['acc1']:.2f}, "
+                f"Imagenet_v2 threshold_metrics Acc@5: {imagenet_v2_threshold_metrics['acc5']:.2f},"
+                f"Imagenet_v2 top_images Val - Loss: {imagenet_v2_top_images_metrics['loss']:.4f}, "
+                f"Imagenet_v2 top_images Acc@1: {imagenet_v2_top_images_metrics['acc1']:.2f}, "
+                f"Imagenet_v2 top_images Acc@5: {imagenet_v2_top_images_metrics['acc5']:.2f},"
             )
+            # # Imagenet C metrics
+            # for metric, metric_value in imagenet_C_metrics.items():
+            #     if isinstance(metric_value, dict):
+            #         for k,v in metric_value.items():
+            #             self.logger.info(
+            #                 f"Imagenet_C corruption: {k}: {v:.4f}"
+            #             )
+            #     else:
+            #         self.logger.info(
+            #             f"Imagenet_C {metric}: {metric_value:.4f}"
+            #         )
+
 
             # Log to wandb
             if self.config.get('use_wandb', False):
                 wandb.log({
-                    'val/loss': val_metrics['loss'],
-                    'val/acc1': val_metrics['acc1'],
-                    'val/acc5': val_metrics['acc5'],
+                    'imagenet_val/loss': val_metrics['loss'],
+                    'imagenet_val/acc1': val_metrics['acc1'],
+                    'imagenet_val/acc5': val_metrics['acc5'],
                     'stylized_IN_val/loss': stylized_imagenet_val_metrics['loss'],
                     'stylized_IN_val/acc1': stylized_imagenet_val_metrics['acc1'],
                     'stylized_IN_val/acc5': stylized_imagenet_val_metrics['acc5'],
@@ -587,8 +836,26 @@ class DenseContrastiveTrainer:
                     'imagenet_R/loss': imagenet_R_val_metrics['loss'],
                     'imagenet_R/acc1': imagenet_R_val_metrics['acc1'],
                     'imagenet_R/acc5': imagenet_R_val_metrics['acc5'],
+                    'imagenet_v2_matched_freq/loss': imagenet_v2_matched_freq_metrics['loss'],
+                    'imagenet_v2_matched_freq/acc1': imagenet_v2_matched_freq_metrics['acc1'],
+                    'imagenet_v2_matched_freq/acc5': imagenet_v2_matched_freq_metrics['acc5'],
+                    'imagenet_v2_threshold/loss': imagenet_v2_threshold_metrics['loss'],
+                    'imagenet_v2_threshold/acc1': imagenet_v2_threshold_metrics['acc1'],
+                    'imagenet_v2_threshold/acc5': imagenet_v2_threshold_metrics['acc5'],
+                    'imagenet_v2_top_images/loss': imagenet_v2_top_images_metrics['loss'],
+                    'imagenet_v2_top_images/acc1': imagenet_v2_top_images_metrics['acc1'],
+                    'imagenet_v2_top_images/acc5': imagenet_v2_top_images_metrics['acc5'],
                     'epoch': epoch
                 })
+                # # Imagenet C metrics
+                # imagenet_C_metrics_to_log = {}
+                # for metric, metric_value in imagenet_C_metrics.items():
+                #     if isinstance(metric_value, dict):
+                #         for k, v in metric_value.items():
+                #             imagenet_C_metrics_to_log['imagenet_C/' + k] = v
+                #     else:
+                #         imagenet_C_metrics_to_log['imagenet_C/' + metric] = metric_value
+                # wandb.log(imagenet_C_metrics_to_log)
 
             # Save checkpoint
             is_best = val_metrics['acc1'] > best_acc1
@@ -623,6 +890,12 @@ if __name__ == "__main__":
     parser.add_argument('--imagenet-R', type=str,
                         default='/home/cognition/datasets/imagenet-r',
                         help='Path to ImageNet_R validation set')
+    parser.add_argument('--imagenet-v2', type=str,
+                        default='/home/cognition/datasets/imagenet-v2',
+                        help='Path to ImageNet_v2 validation set')
+    parser.add_argument('--imagenet-C', type=str,
+                        default='/home/cognition/datasets/imagenet-c',
+                        help='Path to ImageNet_C validation set')
     parser.add_argument('--model-name', type=str, default='vit_tiny_patch16_224', help='Model architecture')
     parser.add_argument('--experiment-name', type=str, default='dense_vit_tiny_baseline1', help='WANDB experiment name')
     parser.add_argument('--num-classes', type=int, default=1000, help='Number of classes')
@@ -644,6 +917,8 @@ if __name__ == "__main__":
         'stylized_imagenet': args.stylized_imagenet,
         'imagenet_A': args.imagenet_A,
         'imagenet_R': args.imagenet_R,
+        'imagenet_C': args.imagenet_C,
+        'imagenet_v2': args.imagenet_v2,
         'save_dir': args.ckpt_dir,
         'batch_size': args.batch_size,
         'epochs': args.epochs,

@@ -15,7 +15,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 import argparse
 import logging
 
-from dense_vit_model import DenseContrastiveViT
+from dense_contrastive_vit_model import DenseContrastiveViT
 
 
 class ModelEvaluator:
