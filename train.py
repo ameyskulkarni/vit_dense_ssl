@@ -903,6 +903,7 @@ if __name__ == "__main__":
     parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
+    parser.add_argument('--grad-clip', type=float, default=5, help='At what value to clip and scale the gradients')
     parser.add_argument('--ckpt-dir', type=str, default='./models', help='Directory to save results')
     parser.add_argument('--pretrained', type=bool, required=False, default=True, help='If to use deit pretrained weights')
     parser.add_argument('--model-parallel', type=bool, required=False, default=False, help='If to parallelize the model across GPUs')
@@ -928,7 +929,7 @@ if __name__ == "__main__":
         'drop_rate': 0.0,
         'drop_path_rate': 0.1,
         'num_workers': args.num_workers,
-        'grad_clip': 5.0,
+        'grad_clip': args.grad_clip,
         'lambda_weight': args.lambda_weight,
         'pretrained': args.pretrained,
         'temperature': 0.2,
