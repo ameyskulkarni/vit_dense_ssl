@@ -39,10 +39,20 @@ class DenseContrastiveViT(nn.Module):
         self.classification_head = nn.Linear(self.embed_dim, num_classes)
 
         # Dense projection head for contrastive learning
+        # Dense Head v1.0
+        # self.dense_projection_head = nn.Sequential(
+        #     nn.Linear(self.embed_dim, 2048),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(2048, dense_dim)
+        # )
+
+        # Dense Head v2.0
         self.dense_projection_head = nn.Sequential(
-            nn.Linear(self.embed_dim, 2048),
-            nn.ReLU(inplace=True),
-            nn.Linear(2048, dense_dim)
+            nn.Linear(self.embed_dim, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),  # ✅ Works with [B, N, D]
+            nn.GELU(),  # Better activation for transformers
+            nn.Dropout(0.1),
+            nn.Linear(self.embed_dim, dense_dim)
         )
 
         # Initialize weights

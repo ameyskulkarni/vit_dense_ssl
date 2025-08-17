@@ -410,7 +410,19 @@ class DenseContrastiveTrainer:
 
 
             # Total loss
-            total_loss = (1 - self.lambda_weight) * cls_loss + self.lambda_weight * dense_loss
+            if self.config.get('contrastive_weight_adaptive', False):
+                # Start with classification-focused training
+                warmup_target = 0.2 * self.lambda_weight
+                if epoch < self.warmup_epochs:
+                    adaptive_lambda = warmup_target * ((epoch + 1) / self.warmup_epochs)  # First warmup epochs: 0 -> 20% of self.lambda (upperbound)
+                else:
+                    # Then gradually increase
+                    progress = (epoch - self.warmup_epochs + 1) / (self.config.get('epochs', 55) - self.warmup_epochs)
+                    adaptive_lambda = warmup_target + progress * (self.lambda_weight - warmup_target)
+                
+                total_loss = (1 - adaptive_lambda) * cls_loss + adaptive_lambda * dense_loss
+            else:
+                total_loss = (1 - self.lambda_weight) * cls_loss + self.lambda_weight * dense_loss
 
             # Backward pass
             self.optimizer.zero_grad()
@@ -659,96 +671,96 @@ class DenseContrastiveTrainer:
         for epoch in range(1, self.config['epochs'] + 1):
             self.logger.info(f"Epoch {epoch}/{self.config['epochs']}")
 
-            if epoch == 1:
-                val_metrics = self.validate(0, self.val_loader)
-                stylized_imagenet_val_metrics = self.validate(epoch, self.stylized_imagenet_val_loader)
-                sketch_imagenet_val_metrics = self.validate(epoch, self.sketch_imagenet_val_loader)
-                imagenet_A_val_metrics = self.validate(epoch, self.imagenet_A_val_loader)
-                imagenet_R_val_metrics = self.validate(epoch, self.imagenet_R_val_loader)
-                # ImageNet-v2 variants
-                imagenet_v2_matched_freq_metrics = self.validate(epoch, self.imagenet_v2_matched_freq_loader)
-                imagenet_v2_threshold_metrics = self.validate(epoch, self.imagenet_v2_threshold_loader)
-                imagenet_v2_top_images_metrics = self.validate(epoch, self.imagenet_v2_top_images_loader)
-                # Imagenet C
-                # imagenet_C_corruption_results = self.validate_imagenet_c_by_corruption(epoch)
-                # imagenet_C_metrics = self.calculate_imagenet_c_metrics(imagenet_C_corruption_results)
-
-                self.logger.info(
-                    f"Val - Loss: {val_metrics['loss']:.4f}, "
-                    f"Acc@1: {val_metrics['acc1']:.2f}, "
-                    f"Acc@5: {val_metrics['acc5']:.2f}, "
-                    f"Stylized IN Val - Loss: {stylized_imagenet_val_metrics['loss']:.4f}, "
-                    f"Stylized IN Acc@1: {stylized_imagenet_val_metrics['acc1']:.2f}, "
-                    f"Stylized IN Acc@5: {stylized_imagenet_val_metrics['acc5']:.2f}, "
-                    f"Sketch IN Val - Loss: {sketch_imagenet_val_metrics['loss']:.4f}, "
-                    f"Sketch IN Acc@1: {sketch_imagenet_val_metrics['acc1']:.2f}, "
-                    f"Sketch IN Acc@5: {sketch_imagenet_val_metrics['acc5']:.2f}, "
-                    f"Imagenet_A Val - Loss: {imagenet_A_val_metrics['loss']:.4f}, "
-                    f"Imagenet_A Acc@1: {imagenet_A_val_metrics['acc1']:.2f}, "
-                    f"Imagenet_A Acc@5: {imagenet_A_val_metrics['acc5']:.2f}, "
-                    f"Imagenet_R Val - Loss: {imagenet_R_val_metrics['loss']:.4f}, "
-                    f"Imagenet_R Acc@1: {imagenet_R_val_metrics['acc1']:.2f}, "
-                    f"Imagenet_R Acc@5: {imagenet_R_val_metrics['acc5']:.2f},"
-                    f"Imagenet_v2 matched_freq Val - Loss: {imagenet_v2_matched_freq_metrics['loss']:.4f}, "
-                    f"Imagenet_v2 matched_freq Acc@1: {imagenet_v2_matched_freq_metrics['acc1']:.2f}, "
-                    f"Imagenet_v2 matched_freq Acc@5: {imagenet_v2_matched_freq_metrics['acc5']:.2f},"
-                    f"Imagenet_v2 threshold_metrics Val - Loss: {imagenet_v2_threshold_metrics['loss']:.4f}, "
-                    f"Imagenet_v2 threshold_metrics Acc@1: {imagenet_v2_threshold_metrics['acc1']:.2f}, "
-                    f"Imagenet_v2 threshold_metrics Acc@5: {imagenet_v2_threshold_metrics['acc5']:.2f},"
-                    f"Imagenet_v2 top_images Val - Loss: {imagenet_v2_top_images_metrics['loss']:.4f}, "
-                    f"Imagenet_v2 top_images Acc@1: {imagenet_v2_top_images_metrics['acc1']:.2f}, "
-                    f"Imagenet_v2 top_images Acc@5: {imagenet_v2_top_images_metrics['acc5']:.2f},"
-                )
-                # # Imagenet C metrics
-                # for metric, metric_value in imagenet_C_metrics.items():
-                #     if isinstance(metric_value, dict):
-                #         for k, v in metric_value.items():
-                #             self.logger.info(
-                #                 f"Imagenet_C corruption: {k}: {v:.4f}"
-                #             )
-                #     else:
-                #         self.logger.info(
-                #             f"Imagenet_C {metric}: {metric_value:.4f}"
-                #         )
-
-                # Log to wandb
-                if self.config.get('use_wandb', False):
-                    wandb.log({
-                        'imagenet_val/loss': val_metrics['loss'],
-                        'imagenet_val/acc1': val_metrics['acc1'],
-                        'imagenet_val/acc5': val_metrics['acc5'],
-                        'stylized_IN_val/loss': stylized_imagenet_val_metrics['loss'],
-                        'stylized_IN_val/acc1': stylized_imagenet_val_metrics['acc1'],
-                        'stylized_IN_val/acc5': stylized_imagenet_val_metrics['acc5'],
-                        'sketch_IN_val/loss': sketch_imagenet_val_metrics['loss'],
-                        'sketch_IN_val/acc1': sketch_imagenet_val_metrics['acc1'],
-                        'sketch_IN_val/acc5': sketch_imagenet_val_metrics['acc5'],
-                        'imagenet_A/loss': imagenet_A_val_metrics['loss'],
-                        'imagenet_A/acc1': imagenet_A_val_metrics['acc1'],
-                        'imagenet_A/acc5': imagenet_A_val_metrics['acc5'],
-                        'imagenet_R/loss': imagenet_R_val_metrics['loss'],
-                        'imagenet_R/acc1': imagenet_R_val_metrics['acc1'],
-                        'imagenet_R/acc5': imagenet_R_val_metrics['acc5'],
-                        'imagenet_v2_matched_freq/loss': imagenet_v2_matched_freq_metrics['loss'],
-                        'imagenet_v2_matched_freq/acc1': imagenet_v2_matched_freq_metrics['acc1'],
-                        'imagenet_v2_matched_freq/acc5': imagenet_v2_matched_freq_metrics['acc5'],
-                        'imagenet_v2_threshold/loss': imagenet_v2_threshold_metrics['loss'],
-                        'imagenet_v2_threshold/acc1': imagenet_v2_threshold_metrics['acc1'],
-                        'imagenet_v2_threshold/acc5': imagenet_v2_threshold_metrics['acc5'],
-                        'imagenet_v2_top_images/loss': imagenet_v2_top_images_metrics['loss'],
-                        'imagenet_v2_top_images/acc1': imagenet_v2_top_images_metrics['acc1'],
-                        'imagenet_v2_top_images/acc5': imagenet_v2_top_images_metrics['acc5'],
-                        'epoch': epoch
-                    })
-                    # # Imagenet C metrics
-                    # imagenet_C_metrics_to_log = {}
-                    # for metric, metric_value in imagenet_C_metrics.items():
-                    #     if isinstance(metric_value, dict):
-                    #         for k, v in metric_value.items():
-                    #             imagenet_C_metrics_to_log['imagenet_C/' + k] = v
-                    #     else:
-                    #         imagenet_C_metrics_to_log['imagenet_C/' + metric] = metric_value
-                    # wandb.log(imagenet_C_metrics_to_log)
+            # if epoch == 1:
+            #     val_metrics = self.validate(0, self.val_loader)
+            #     stylized_imagenet_val_metrics = self.validate(epoch, self.stylized_imagenet_val_loader)
+            #     sketch_imagenet_val_metrics = self.validate(epoch, self.sketch_imagenet_val_loader)
+            #     imagenet_A_val_metrics = self.validate(epoch, self.imagenet_A_val_loader)
+            #     imagenet_R_val_metrics = self.validate(epoch, self.imagenet_R_val_loader)
+            #     # ImageNet-v2 variants
+            #     imagenet_v2_matched_freq_metrics = self.validate(epoch, self.imagenet_v2_matched_freq_loader)
+            #     imagenet_v2_threshold_metrics = self.validate(epoch, self.imagenet_v2_threshold_loader)
+            #     imagenet_v2_top_images_metrics = self.validate(epoch, self.imagenet_v2_top_images_loader)
+            #     # Imagenet C
+            #     # imagenet_C_corruption_results = self.validate_imagenet_c_by_corruption(epoch)
+            #     # imagenet_C_metrics = self.calculate_imagenet_c_metrics(imagenet_C_corruption_results)
+            #
+            #     self.logger.info(
+            #         f"Val - Loss: {val_metrics['loss']:.4f}, "
+            #         f"Acc@1: {val_metrics['acc1']:.2f}, "
+            #         f"Acc@5: {val_metrics['acc5']:.2f}, "
+            #         f"Stylized IN Val - Loss: {stylized_imagenet_val_metrics['loss']:.4f}, "
+            #         f"Stylized IN Acc@1: {stylized_imagenet_val_metrics['acc1']:.2f}, "
+            #         f"Stylized IN Acc@5: {stylized_imagenet_val_metrics['acc5']:.2f}, "
+            #         f"Sketch IN Val - Loss: {sketch_imagenet_val_metrics['loss']:.4f}, "
+            #         f"Sketch IN Acc@1: {sketch_imagenet_val_metrics['acc1']:.2f}, "
+            #         f"Sketch IN Acc@5: {sketch_imagenet_val_metrics['acc5']:.2f}, "
+            #         f"Imagenet_A Val - Loss: {imagenet_A_val_metrics['loss']:.4f}, "
+            #         f"Imagenet_A Acc@1: {imagenet_A_val_metrics['acc1']:.2f}, "
+            #         f"Imagenet_A Acc@5: {imagenet_A_val_metrics['acc5']:.2f}, "
+            #         f"Imagenet_R Val - Loss: {imagenet_R_val_metrics['loss']:.4f}, "
+            #         f"Imagenet_R Acc@1: {imagenet_R_val_metrics['acc1']:.2f}, "
+            #         f"Imagenet_R Acc@5: {imagenet_R_val_metrics['acc5']:.2f},"
+            #         f"Imagenet_v2 matched_freq Val - Loss: {imagenet_v2_matched_freq_metrics['loss']:.4f}, "
+            #         f"Imagenet_v2 matched_freq Acc@1: {imagenet_v2_matched_freq_metrics['acc1']:.2f}, "
+            #         f"Imagenet_v2 matched_freq Acc@5: {imagenet_v2_matched_freq_metrics['acc5']:.2f},"
+            #         f"Imagenet_v2 threshold_metrics Val - Loss: {imagenet_v2_threshold_metrics['loss']:.4f}, "
+            #         f"Imagenet_v2 threshold_metrics Acc@1: {imagenet_v2_threshold_metrics['acc1']:.2f}, "
+            #         f"Imagenet_v2 threshold_metrics Acc@5: {imagenet_v2_threshold_metrics['acc5']:.2f},"
+            #         f"Imagenet_v2 top_images Val - Loss: {imagenet_v2_top_images_metrics['loss']:.4f}, "
+            #         f"Imagenet_v2 top_images Acc@1: {imagenet_v2_top_images_metrics['acc1']:.2f}, "
+            #         f"Imagenet_v2 top_images Acc@5: {imagenet_v2_top_images_metrics['acc5']:.2f},"
+            #     )
+            #     # # Imagenet C metrics
+            #     # for metric, metric_value in imagenet_C_metrics.items():
+            #     #     if isinstance(metric_value, dict):
+            #     #         for k, v in metric_value.items():
+            #     #             self.logger.info(
+            #     #                 f"Imagenet_C corruption: {k}: {v:.4f}"
+            #     #             )
+            #     #     else:
+            #     #         self.logger.info(
+            #     #             f"Imagenet_C {metric}: {metric_value:.4f}"
+            #     #         )
+            #
+            #     # Log to wandb
+            #     if self.config.get('use_wandb', False):
+            #         wandb.log({
+            #             'imagenet_val/loss': val_metrics['loss'],
+            #             'imagenet_val/acc1': val_metrics['acc1'],
+            #             'imagenet_val/acc5': val_metrics['acc5'],
+            #             'stylized_IN_val/loss': stylized_imagenet_val_metrics['loss'],
+            #             'stylized_IN_val/acc1': stylized_imagenet_val_metrics['acc1'],
+            #             'stylized_IN_val/acc5': stylized_imagenet_val_metrics['acc5'],
+            #             'sketch_IN_val/loss': sketch_imagenet_val_metrics['loss'],
+            #             'sketch_IN_val/acc1': sketch_imagenet_val_metrics['acc1'],
+            #             'sketch_IN_val/acc5': sketch_imagenet_val_metrics['acc5'],
+            #             'imagenet_A/loss': imagenet_A_val_metrics['loss'],
+            #             'imagenet_A/acc1': imagenet_A_val_metrics['acc1'],
+            #             'imagenet_A/acc5': imagenet_A_val_metrics['acc5'],
+            #             'imagenet_R/loss': imagenet_R_val_metrics['loss'],
+            #             'imagenet_R/acc1': imagenet_R_val_metrics['acc1'],
+            #             'imagenet_R/acc5': imagenet_R_val_metrics['acc5'],
+            #             'imagenet_v2_matched_freq/loss': imagenet_v2_matched_freq_metrics['loss'],
+            #             'imagenet_v2_matched_freq/acc1': imagenet_v2_matched_freq_metrics['acc1'],
+            #             'imagenet_v2_matched_freq/acc5': imagenet_v2_matched_freq_metrics['acc5'],
+            #             'imagenet_v2_threshold/loss': imagenet_v2_threshold_metrics['loss'],
+            #             'imagenet_v2_threshold/acc1': imagenet_v2_threshold_metrics['acc1'],
+            #             'imagenet_v2_threshold/acc5': imagenet_v2_threshold_metrics['acc5'],
+            #             'imagenet_v2_top_images/loss': imagenet_v2_top_images_metrics['loss'],
+            #             'imagenet_v2_top_images/acc1': imagenet_v2_top_images_metrics['acc1'],
+            #             'imagenet_v2_top_images/acc5': imagenet_v2_top_images_metrics['acc5'],
+            #             'epoch': epoch
+            #         })
+            #         # # Imagenet C metrics
+            #         # imagenet_C_metrics_to_log = {}
+            #         # for metric, metric_value in imagenet_C_metrics.items():
+            #         #     if isinstance(metric_value, dict):
+            #         #         for k, v in metric_value.items():
+            #         #             imagenet_C_metrics_to_log['imagenet_C/' + k] = v
+            #         #     else:
+            #         #         imagenet_C_metrics_to_log['imagenet_C/' + metric] = metric_value
+            #         # wandb.log(imagenet_C_metrics_to_log)
 
             # Training
             train_metrics = self.train_epoch(epoch)
@@ -902,6 +914,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for evaluation')
     parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--contrastive-weight-adaptive', type=bool, required=False, default=False, help='If to use adaptive contrastive weighting. If this is True, --lamdba-weight parameter is ignored.')
     parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
     parser.add_argument('--grad-clip', type=float, default=5, help='At what value to clip and scale the gradients')
     parser.add_argument('--learning-rate', type=float, default=0.00001, help='Learning rate')
@@ -931,6 +944,7 @@ if __name__ == "__main__":
         'drop_path_rate': 0.1,
         'num_workers': args.num_workers,
         'grad_clip': args.grad_clip,
+        'contrastive_weight_adaptive': args.contrastive_weight_adaptive,
         'lambda_weight': args.lambda_weight,
         'pretrained': args.pretrained,
         'temperature': 0.2,
