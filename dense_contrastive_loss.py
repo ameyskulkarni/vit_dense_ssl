@@ -91,7 +91,7 @@ class DenseContrastiveLoss(nn.Module):
         B, H, W, D = dense_features_1.shape
 
         # Extract correspondence using backbone features
-        correspondence = self.extract_correspondence(backbone_features_1, backbone_features_2)
+        correspondence = self.extract_correspondence(dense_features_1, dense_features_2)
 
         # Flatten dense features
         queries = dense_features_1.view(B, H * W, D)  # [B, H*W, D]
