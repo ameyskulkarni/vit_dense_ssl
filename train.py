@@ -328,7 +328,8 @@ class DenseContrastiveTrainer:
         self.dense_contrastive_criterion = DenseContrastiveLoss(
             temperature=self.config.get('temperature', 0.2),
             queue_size=self.config.get('queue_size', 65536),
-            momentum=self.config.get('momentum', 0.999)
+            momentum=self.config.get('momentum', 0.999),
+            correspondence_features=self.config.get('correspondence_features', 'dense'),
         ).to(self.device)
 
         # Loss weight
@@ -671,7 +672,7 @@ class DenseContrastiveTrainer:
         for epoch in range(1, self.config['epochs'] + 1):
             self.logger.info(f"Epoch {epoch}/{self.config['epochs']}")
 
-            if epoch == 1:
+            if epoch == 1 and self.config.get('log_baseline_res', True):
                 val_metrics = self.validate(0, self.val_loader)
                 stylized_imagenet_val_metrics = self.validate(epoch, self.stylized_imagenet_val_loader)
                 sketch_imagenet_val_metrics = self.validate(epoch, self.sketch_imagenet_val_loader)
@@ -915,6 +916,8 @@ if __name__ == "__main__":
     parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--contrastive-weight-adaptive', type=bool, required=False, default=False, help='If to use adaptive contrastive weighting. If this is True, --lamdba-weight parameter is ignored.')
+    parser.add_argument('--log-baseline-res', type=bool, required=False, default=True, help='Logs results before training begins with the existing weights')
+    parser.add_argument('--correspondence-features', type=str, default='dense', help='What features to use for correspondence finding. Options: [dense, backbone]')
     parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
     parser.add_argument('--grad-clip', type=float, default=5, help='At what value to clip and scale the gradients')
     parser.add_argument('--learning-rate', type=float, default=0.00001, help='Learning rate')
@@ -925,9 +928,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     # Configuration
     config = {
+        # Model arch arguments
         'model_name': args.model_name,
         'num_classes': args.num_classes,
         'dense_dim': 128,
+        'model_parallel': args.model_parallel,
+
+        # Dataset related arguments
         'data_path': args.imagenet,  # Update this path
         'stylized_imagenet': args.stylized_imagenet,
         'imagenet_A': args.imagenet_A,
@@ -935,6 +942,8 @@ if __name__ == "__main__":
         'imagenet_C': args.imagenet_C,
         'imagenet_v2': args.imagenet_v2,
         'save_dir': args.ckpt_dir,
+
+        # Optimization arguments
         'batch_size': args.batch_size,
         'epochs': args.epochs,
         'learning_rate': args.learning_rate,
@@ -944,17 +953,23 @@ if __name__ == "__main__":
         'drop_path_rate': 0.1,
         'num_workers': args.num_workers,
         'grad_clip': args.grad_clip,
-        'contrastive_weight_adaptive': args.contrastive_weight_adaptive,
-        'lambda_weight': args.lambda_weight,
         'pretrained': args.pretrained,
         'temperature': 0.2,
         'queue_size': 1000,
         'momentum': 0.999,
+
+        # Contrastive learning arguments
+        'contrastive_weight_adaptive': args.contrastive_weight_adaptive,
+        'correspondence_features': args.correspondence_features,
+        'lambda_weight': args.lambda_weight,
+
+        # Logging related arguments
         'use_wandb': True,
         'wandb_project': 'dense-contrastive-vit',
         'experiment_name': args.experiment_name,
         'log_interval': 100,
-        'model_parallel': args.model_parallel,
+        'log_baseline_res': args.log_baseline_res,
+
     }
 
     # Create trainer and start training

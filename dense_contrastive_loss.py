@@ -1,17 +1,19 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import sys
 
 class DenseContrastiveLoss(nn.Module):
     """
     Dense Contrastive Loss as described in DenseCL paper
     """
 
-    def __init__(self, temperature=0.2, queue_size=65536, momentum=0.999):
+    def __init__(self, temperature=0.2, queue_size=65536, momentum=0.999, correspondence_features='dense'):
         super().__init__()
         self.temperature = temperature
         self.queue_size = queue_size
         self.momentum = momentum
+        self.correspondence_features = correspondence_features
 
         # Initialize memory queue
         self.register_buffer("queue", torch.randn(queue_size, 128))
@@ -90,8 +92,14 @@ class DenseContrastiveLoss(nn.Module):
         """
         B, H, W, D = dense_features_1.shape
 
-        # Extract correspondence using backbone features
-        correspondence = self.extract_correspondence(backbone_features_1, backbone_features_2)
+        # Extract correspondence using self.correspondense_features
+        if self.correspondence_features == 'dense':
+            correspondence = self.extract_correspondence(dense_features_1, dense_features_2)
+        elif self.correspondence_features == 'backbone':
+            correspondence = self.extract_correspondence(backbone_features_1, backbone_features_2)
+        else:
+            print(f"Unknown correspondence features. Specify 'dense' or 'backbone'")
+            sys.exit(1)
 
         # Flatten dense features
         queries = dense_features_1.view(B, H * W, D)  # [B, H*W, D]
