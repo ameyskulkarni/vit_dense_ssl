@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import sys
 
 class DenseContrastiveLoss(nn.Module):
     """
@@ -96,6 +97,9 @@ class DenseContrastiveLoss(nn.Module):
             correspondence = self.extract_correspondence(dense_features_1, dense_features_2)
         elif self.correspondence_features == 'backbone':
             correspondence = self.extract_correspondence(backbone_features_1, backbone_features_2)
+        else:
+            print(f"Unknown correspondence features. Specify 'dense' or 'backbone'")
+            sys.exit(1)
 
         # Flatten dense features
         queries = dense_features_1.view(B, H * W, D)  # [B, H*W, D]
