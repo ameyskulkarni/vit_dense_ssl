@@ -932,6 +932,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for evaluation')
     parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--queue-size', type=int, default=1000, help='Length of neg queue size')
     parser.add_argument('--contrastive-weight-adaptive',  action="store_true", help='If to use adaptive contrastive weighting. If this is True, --lamdba-weight parameter is ignored.')
     parser.add_argument('--no-log-baseline-res', action="store_true", help='Logs results before training begins with the existing weights')
     parser.add_argument('--correspondence-features', type=str, default='dense', help='What features to use for correspondence finding. Options: [dense, backbone]')
@@ -972,7 +973,7 @@ if __name__ == "__main__":
         'grad_clip': args.grad_clip,
         'pretrained': args.pretrained,
         'temperature': 0.2,
-        'queue_size': 1000,
+        'queue_size': args.queue_size,
         'momentum': 0.999,
 
         # Contrastive learning arguments
