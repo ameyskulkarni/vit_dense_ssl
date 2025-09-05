@@ -2,25 +2,211 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
+import random
 
 class DenseContrastiveLoss(nn.Module):
     """
     Dense Contrastive Loss as described in DenseCL paper
     """
 
-    def __init__(self, temperature=0.2, queue_size=65536, momentum=0.999, correspondence_features='dense'):
+    def __init__(self, temperature=0.2, queue_size=65536, momentum=0.999, correspondence_features='dense', max_patches_per_image=50,
+                 sampling_strategy='random'):
         super().__init__()
         self.temperature = temperature
         self.queue_size = queue_size
         self.momentum = momentum
         self.correspondence_features = correspondence_features
+        self.max_patches_per_image = max_patches_per_image
+        self.sampling_strategy = sampling_strategy  # 'random', 'diverse', or 'hardest'
 
         # Initialize memory queue
         self.register_buffer("queue", torch.randn(queue_size, 128))
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
+        # Track image diversity in queue
+        self.register_buffer("image_ids", torch.zeros(queue_size, dtype=torch.long))
+        self.register_buffer("current_image_id", torch.zeros(1, dtype=torch.long))
+
         # Normalize the queue
         self.queue = F.normalize(self.queue, dim=1)
+
+    def _sample_patches_strategically(self, features, batch_size, height, width):
+        """
+        Sample patches strategically to maximize diversity
+        Args:
+            features: [B, H*W, D] flattened features
+            batch_size, height, width: dimensions
+        Returns:
+            sampled_features: [B, max_patches_per_image, D]
+            sampled_indices: [B, max_patches_per_image] indices of sampled patches
+        """
+        B, HW, D = features.shape
+        device = features.device
+
+        sampled_features_list = []
+        sampled_indices_list = []
+
+        for b in range(B):
+            patch_features = features[b]  # [H*W, D]
+
+            if self.sampling_strategy == 'random':
+                # Simple random sampling
+                if HW <= self.max_patches_per_image:
+                    indices = torch.arange(HW, device=device)
+                    sampled_patches = patch_features
+                else:
+                    indices = torch.randperm(HW, device=device)[:self.max_patches_per_image]
+                    sampled_patches = patch_features[indices]
+
+            elif self.sampling_strategy == 'diverse':
+                # Diverse sampling using clustering-like approach
+                sampled_patches, indices = self._diverse_sampling(patch_features, HW, device)
+
+            elif self.sampling_strategy == 'hardest':
+                # Sample patches that are most different from current queue
+                sampled_patches, indices = self._hard_negative_sampling(patch_features, HW, device)
+
+            # Pad if necessary
+            if len(indices) < self.max_patches_per_image:
+                padding_needed = self.max_patches_per_image - len(indices)
+                # Repeat random patches to fill
+                repeat_indices = torch.randint(0, len(indices), (padding_needed,), device=device)
+                indices = torch.cat([indices, indices[repeat_indices]])
+                sampled_patches = torch.cat([sampled_patches, sampled_patches[repeat_indices]])
+
+            sampled_features_list.append(sampled_patches)
+            sampled_indices_list.append(indices)
+
+        sampled_features = torch.stack(sampled_features_list)  # [B, max_patches_per_image, D]
+        sampled_indices = torch.stack(sampled_indices_list)  # [B, max_patches_per_image]
+
+        return sampled_features, sampled_indices
+
+    def _diverse_sampling(self, patch_features, HW, device):
+        """Diverse sampling using k-means-like approach"""
+        if HW <= self.max_patches_per_image:
+            indices = torch.arange(HW, device=device)
+            return patch_features, indices
+
+        # Simple diverse sampling: divide space into grid and sample from each region
+        H = W = int(HW ** 0.5)  # Assume square feature map
+        grid_size = int((self.max_patches_per_image) ** 0.5)
+
+        indices = []
+        step_h = max(1, H // grid_size)
+        step_w = max(1, W // grid_size)
+
+        for i in range(0, H, step_h):
+            for j in range(0, W, step_w):
+                if len(indices) >= self.max_patches_per_image:
+                    break
+                # Add some randomness within each grid cell
+                actual_i = min(H - 1, i + random.randint(0, min(step_h - 1, H - 1 - i)))
+                actual_j = min(W - 1, j + random.randint(0, min(step_w - 1, W - 1 - j)))
+                idx = actual_i * W + actual_j
+                indices.append(idx)
+
+        # Fill remaining with random samples
+        while len(indices) < self.max_patches_per_image:
+            idx = random.randint(0, HW - 1)
+            if idx not in indices:
+                indices.append(idx)
+
+        indices = torch.tensor(indices[:self.max_patches_per_image], device=device)
+        sampled_patches = patch_features[indices]
+
+        return sampled_patches, indices
+
+    def _hard_negative_sampling(self, patch_features, HW, device):
+        """Sample patches that are most dissimilar to current queue"""
+        if HW <= self.max_patches_per_image:
+            indices = torch.arange(HW, device=device)
+            return patch_features, indices
+
+        # Compute similarity with queue and select most dissimilar
+        with torch.no_grad():
+            queue_normalized = F.normalize(self.queue, dim=1)
+            patch_normalized = F.normalize(patch_features, dim=1)
+
+            # Similarity to queue: [H*W, queue_size]
+            sim_to_queue = torch.mm(patch_normalized, queue_normalized.t())
+
+            # Average similarity to queue for each patch
+            avg_sim = sim_to_queue.mean(dim=1)  # [H*W]
+
+            # Select patches with lowest average similarity (hardest negatives)
+            _, indices = torch.topk(-avg_sim, self.max_patches_per_image, sorted=False)
+
+        sampled_patches = patch_features[indices]
+        return sampled_patches, indices
+
+    def _dequeue_and_enqueue_diverse(self, keys, batch_size):
+        """
+        Update the memory queue with diverse negative samples
+        Args:
+            keys: [B, max_patches_per_image, D] sampled keys
+            batch_size: number of images in batch
+        """
+        # Flatten the sampled keys
+        keys_flat = keys.view(-1, keys.size(-1))  # [B * max_patches_per_image, D]
+        total_samples = keys_flat.size(0)
+
+        ptr = int(self.queue_ptr)
+
+        # Update image IDs for tracking diversity
+        current_id = int(self.current_image_id)
+
+        # Handle case where we have more samples than queue size
+        if total_samples >= self.queue_size:
+            # Randomly sample from the new keys to fill entire queue
+            random_indices = torch.randperm(total_samples)[:self.queue_size]
+            self.queue.copy_(keys_flat[random_indices])
+
+            # Update image IDs (each image gets multiple slots)
+            samples_per_image = self.queue_size // batch_size
+            for i in range(batch_size):
+                start_idx = i * samples_per_image
+                end_idx = (i + 1) * samples_per_image if i < batch_size - 1 else self.queue_size
+                self.image_ids[start_idx:end_idx] = current_id + i
+
+            self.queue_ptr[0] = 0
+        else:
+            # Handle wrap-around case
+            if ptr + total_samples > self.queue_size:
+                remaining_space = self.queue_size - ptr
+
+                # Fill remaining space at the end
+                self.queue[ptr:].copy_(keys_flat[:remaining_space])
+
+                # Put the rest at the beginning
+                overflow = total_samples - remaining_space
+                self.queue[:overflow].copy_(keys_flat[remaining_space:])
+
+                # Update image IDs
+                self.image_ids[ptr:] = current_id
+                self.image_ids[:overflow] = current_id
+
+                ptr = overflow
+            else:
+                # Normal case
+                self.queue[ptr:ptr + total_samples].copy_(keys_flat)
+                self.image_ids[ptr:ptr + total_samples] = current_id
+                ptr = ptr + total_samples
+
+            self.queue_ptr[0] = ptr
+
+        # Increment image ID for next batch
+        self.current_image_id[0] = current_id + batch_size
+
+    def get_queue_diversity_stats(self):
+        """Get statistics about queue diversity"""
+        unique_images = torch.unique(self.image_ids).size(0)
+        total_slots = self.queue_size
+        return {
+            'unique_images_in_queue': unique_images,
+            'total_queue_slots': total_slots,
+            'diversity_ratio': unique_images / total_slots
+        }
 
     def _dequeue_and_enqueue(self, keys):
         """Update the memory queue with new keys - FIXED VERSION"""
@@ -133,11 +319,23 @@ class DenseContrastiveLoss(nn.Module):
         loss = F.cross_entropy(logits, labels)
 
         # FIXED: Update queue with keys from second view (with proper gradient blocking)
+        # with torch.no_grad():
+        #     keys_for_queue = keys.view(-1, D).clone()  # Clone to avoid gradient issues
+        #     # Normalize keys before adding to queue
+        #     keys_for_queue = F.normalize(keys_for_queue, dim=1)
+        #     self._dequeue_and_enqueue(keys_for_queue)
+
+        # Update queue with strategically sampled keys
         with torch.no_grad():
-            keys_for_queue = keys.view(-1, D).clone()  # Clone to avoid gradient issues
-            # Normalize keys before adding to queue
-            keys_for_queue = F.normalize(keys_for_queue, dim=1)
-            self._dequeue_and_enqueue(keys_for_queue)
+            # Sample diverse patches from keys
+            sampled_keys, sampled_indices = self._sample_patches_strategically(
+                keys, B, H, W
+            )
 
+            # Normalize sampled keys
+            sampled_keys = F.normalize(sampled_keys, dim=2)
 
-        return loss, pos_sim, neg_sim
+            # Update queue with diverse samples
+            self._dequeue_and_enqueue_diverse(sampled_keys, B)
+
+        return loss, pos_sim, neg_sim, queries, positive_keys, correspondence, queue_normalized
