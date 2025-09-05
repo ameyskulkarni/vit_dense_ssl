@@ -19,8 +19,9 @@ from dense_contrastive_loss import DenseContrastiveLoss
 from contrastive_image_dataset import ContrastiveImageDataset
 from sketch_imagenet_dataset_builder import ImageNetSketchDataset
 from dataset_class_matching import ImageNetV2Dataset, ImageNetADataset, ImageNetRDataset
-from compute_similarity_stats import compute_similarity_stats
-from compute_feature_collapse import compute_feature_rank, track_weight_changes
+from compute_similarity_stats import ContrastiveLearningMetrics
+from compute_feature_collapse import compute_feature_rank
+from weight_tracker import WeightTracker
 
 
 class AverageMeter:
@@ -330,6 +331,8 @@ class DenseContrastiveTrainer:
             queue_size=self.config.get('queue_size', 65536),
             momentum=self.config.get('momentum', 0.999),
             correspondence_features=self.config.get('correspondence_features', 'dense'),
+            max_patches_per_image=50,  # Sample 50 patches per image
+            sampling_strategy='random'  # or 'random', 'hardest'
         ).to(self.device)
 
         # Loss weight
@@ -344,7 +347,7 @@ class DenseContrastiveTrainer:
         return total_norm ** 0.5
 
 
-    def train_epoch(self, epoch: int) -> Dict[str, float]:
+    def train_epoch(self, epoch: int, weight_tracker: WeightTracker) -> Dict[str, float]:
         """Train one epoch"""
         self.model.train()
 
@@ -357,12 +360,13 @@ class DenseContrastiveTrainer:
         top1 = AverageMeter('Acc@1', ':6.2f')
         top5 = AverageMeter('Acc@5', ':6.2f')
 
+        cl_metrics = ContrastiveLearningMetrics()
+
         end = time.time()
 
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch}')
 
         for i, (images, targets) in enumerate(pbar):
-            self.prev_dense_weights = {}
             training_analysis_metric = {}
             # Measure data loading time
             data_time.update(time.time() - end)
@@ -383,21 +387,31 @@ class DenseContrastiveTrainer:
                 # Dense contrastive loss
                 # For correspondence, we use the dense features as backbone features
                 # In practice, you might want to use features from an earlier layer
-                dense_loss, pos_sim, neg_sim = self.dense_contrastive_criterion(
+                dense_loss, pos_sim, neg_sim, queries, positive_keys, correspondence, neg_queue_features = self.dense_contrastive_criterion(
                     dense_features_1, dense_features_2,
                     backbone_features_1, backbone_features_2  # Using same features for correspondence
                 )
+                if self.config.get('correspondence_features', 'dense'):
+                    corr_features_1 = dense_features_1
+                    corr_features_2 = dense_features_2
+                else:
+                    corr_features_1 = backbone_features_1
+                    corr_features_2 = backbone_features_2
+
                 if i % 10 == 0:
-                    sim_stats = compute_similarity_stats(pos_sim, neg_sim)
+                    sim_stats = cl_metrics.compute_metrics(queries, positive_keys, neg_sim, pos_sim, correspondence,
+                        corr_features_1, corr_features_2, neg_queue_features)
                     effective_rank1, eigenvals1 = compute_feature_rank(dense_features_1)
                     effective_rank2, eigenvals2 = compute_feature_rank(dense_features_2)
-                    weight_changes, self.prev_dense_weights = track_weight_changes(self.model, self.prev_dense_weights)
+                    weight_changes = weight_tracker.track_weight_changes(self.model)
+                    diversity_stats = self.dense_contrastive_criterion.get_queue_diversity_stats()
                     training_analysis_metric.update(sim_stats)
                     training_analysis_metric.update(weight_changes)
                     training_analysis_metric['feature_collapse/effective_rank1'] = effective_rank1
                     training_analysis_metric['feature_collapse/eigenvals1'] = eigenvals1
                     training_analysis_metric['feature_collapse/effective_rank2'] = effective_rank2
                     training_analysis_metric['feature_collapse/eigenvals2'] = eigenvals2
+                    training_analysis_metric['feature_diversity_stats/unique_images_in_queue'] = diversity_stats['unique_images_in_queue']
             else:
                 # Skip dense computations entirely
                 cls_output_1 = self.model(images_1, return_dense=False)  # or just self.model(images_1)
@@ -668,11 +682,14 @@ class DenseContrastiveTrainer:
     def train(self):
         """Main training loop"""
         best_acc1 = 0.0
+        weight_tracker = WeightTracker()
+        weight_tracker._store_current_weights(self.model)
 
         for epoch in range(1, self.config['epochs'] + 1):
             self.logger.info(f"Epoch {epoch}/{self.config['epochs']}")
 
-            if epoch == 1 and self.config.get('log_baseline_res', True):
+
+            if epoch == 1 and not self.config.get('no_log_baseline_res', True):
                 val_metrics = self.validate(0, self.val_loader)
                 stylized_imagenet_val_metrics = self.validate(epoch, self.stylized_imagenet_val_loader)
                 sketch_imagenet_val_metrics = self.validate(epoch, self.sketch_imagenet_val_loader)
@@ -764,7 +781,7 @@ class DenseContrastiveTrainer:
                     # wandb.log(imagenet_C_metrics_to_log)
 
             # Training
-            train_metrics = self.train_epoch(epoch)
+            train_metrics = self.train_epoch(epoch, weight_tracker)
 
             # Validation
             val_metrics = self.validate(epoch, self.val_loader)
@@ -915,8 +932,8 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for evaluation')
     parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
-    parser.add_argument('--contrastive-weight-adaptive', type=bool, required=False, default=False, help='If to use adaptive contrastive weighting. If this is True, --lamdba-weight parameter is ignored.')
-    parser.add_argument('--log-baseline-res', type=bool, required=False, default=True, help='Logs results before training begins with the existing weights')
+    parser.add_argument('--contrastive-weight-adaptive',  action="store_true", help='If to use adaptive contrastive weighting. If this is True, --lamdba-weight parameter is ignored.')
+    parser.add_argument('--no-log-baseline-res', action="store_true", help='Logs results before training begins with the existing weights')
     parser.add_argument('--correspondence-features', type=str, default='dense', help='What features to use for correspondence finding. Options: [dense, backbone]')
     parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
     parser.add_argument('--grad-clip', type=float, default=5, help='At what value to clip and scale the gradients')
@@ -968,9 +985,10 @@ if __name__ == "__main__":
         'wandb_project': 'dense-contrastive-vit',
         'experiment_name': args.experiment_name,
         'log_interval': 100,
-        'log_baseline_res': args.log_baseline_res,
+        'no_log_baseline_res': args.no_log_baseline_res,
 
     }
+    print(f"Args:{args}")
 
     # Create trainer and start training
     trainer = DenseContrastiveTrainer(config)
