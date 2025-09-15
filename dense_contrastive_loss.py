@@ -142,61 +142,157 @@ class DenseContrastiveLoss(nn.Module):
 
     def _dequeue_and_enqueue_diverse(self, keys, batch_size):
         """
-        Update the memory queue with diverse negative samples
+        Update the memory queue with diverse negative samples while maintaining proper image ID tracking.
+
+        This function implements a circular buffer (FIFO queue) that stores patch features from multiple
+        batches to serve as negative samples for contrastive learning. It ensures proper tracking of
+        which original image each patch came from to avoid using same-image patches as negatives.
+
         Args:
-            keys: [B, max_patches_per_image, D] sampled keys
-            batch_size: number of images in batch
+            keys: [B, max_patches_per_image, D] - Sampled patch features from current batch
+                  B = batch_size, max_patches_per_image = patches sampled per image, D = feature dimension
+                  Example: [256, 50, 768] for 256 images, 50 patches each, 768-dim features
+            batch_size: int - Number of images in the current batch (should match B dimension of keys)
+
+        Queue Update Strategy:
+            - If new samples >= queue_size: Replace entire queue with random subset of new samples
+            - If new samples < queue_size: Add incrementally using circular buffer (FIFO)
+
+        Image ID Tracking:
+            - Each patch gets assigned the ID of its source image
+            - IDs are used during contrastive loss to exclude same-image negatives
+            - current_image_id tracks the starting ID for the current batch
+
+        Memory Layout After Update:
+            self.queue: [queue_size, D] - Patch features serving as negative sample pool
+            self.image_ids: [queue_size] - Source image ID for each patch in queue
+            self.queue_ptr: [1] - Current insertion pointer for circular buffer
         """
-        # Flatten the sampled keys
-        keys_flat = keys.view(-1, keys.size(-1))  # [B * max_patches_per_image, D]
-        total_samples = keys_flat.size(0)
 
-        ptr = int(self.queue_ptr)
+        # ========================================================================================
+        # STEP 1: FLATTEN INPUT AND EXTRACT DIMENSIONS
+        # ========================================================================================
 
-        # Update image IDs for tracking diversity
-        current_id = int(self.current_image_id)
+        # Convert from per-image structure to flat list of all patches
+        # Input:  [B, max_patches_per_image, D] = [256, 50, 768]
+        # Output: [B * max_patches_per_image, D] = [12800, 768]
+        keys_flat = keys.view(-1, keys.size(-1))
+        total_samples = keys_flat.size(0)  # 12800 total patch features
 
-        # Handle case where we have more samples than queue size
+        # ========================================================================================
+        # STEP 2: GET CURRENT STATE AND PREPARE IMAGE ID ASSIGNMENTS
+        # ========================================================================================
+
+        # Get current queue insertion pointer and image ID counter
+        ptr = int(self.queue_ptr)  # Current position in circular buffer (0 to queue_size-1)
+        current_id = int(self.current_image_id)  # Starting image ID for this batch
+
+        # ========================================================================================
+        # STEP 3: CREATE PROPER IMAGE ID MAPPING FOR ALL PATCHES
+        # ========================================================================================
+
+        batch_image_ids = []
+        for img_idx in range(batch_size):
+            # Calculate the actual image ID for this image in the batch
+            actual_image_id = current_id + img_idx
+
+            # All patches from this image get the same image ID
+            patches_from_this_image = [actual_image_id] * self.max_patches_per_image
+            batch_image_ids.extend(patches_from_this_image)
+
+        # Convert to tensor for efficient operations
+        batch_image_ids = torch.tensor(batch_image_ids, device=keys.device)
+
+        # Example of batch_image_ids structure:
+        # [100, 100, 100, ..., 100,    # 50 patches from image 100
+        #  101, 101, 101, ..., 101,    # 50 patches from image 101
+        #  102, 102, 102, ..., 102,    # 50 patches from image 102
+        #  ...
+        #  355, 355, 355, ..., 355]    # 50 patches from image 355
+
+        # ========================================================================================
+        # STEP 4: QUEUE UPDATE STRATEGY DECISION
+        # ========================================================================================
+
         if total_samples >= self.queue_size:
-            # Randomly sample from the new keys to fill entire queue
-            random_indices = torch.randperm(total_samples)[:self.queue_size]
+
+            # --------------------------------------------------------------------------------
+            # LARGE UPDATE: Replace entire queue with random subset of new samples
+            # --------------------------------------------------------------------------------
+
+            # Randomly sample from new patches to fill entire queue
+            # This ensures we get diverse representation even when we have more samples than queue space
+            random_indices = torch.randperm(total_samples, device=keys.device)[:self.queue_size]
+
+            # Replace entire queue contents
             self.queue.copy_(keys_flat[random_indices])
 
-            # Update image IDs (each image gets multiple slots)
-            samples_per_image = self.queue_size // batch_size
-            for i in range(batch_size):
-                start_idx = i * samples_per_image
-                end_idx = (i + 1) * samples_per_image if i < batch_size - 1 else self.queue_size
-                self.image_ids[start_idx:end_idx] = current_id + i
+            # Update image IDs using the same random selection
+            # This maintains correspondence between patches and their source image IDs
+            self.image_ids.copy_(batch_image_ids[random_indices])
 
+            # Reset queue pointer since we replaced everything
             self.queue_ptr[0] = 0
+
         else:
-            # Handle wrap-around case
+            # --------------------------------------------------------------------------------
+            # INCREMENTAL UPDATE: Add samples to circular buffer
+            # --------------------------------------------------------------------------------
+
             if ptr + total_samples > self.queue_size:
+
+                # Calculate how much space remains at the end of the queue
                 remaining_space = self.queue_size - ptr
 
-                # Fill remaining space at the end
+                # -----------------------------------------------------------------------
+                # PART 1: Fill remaining space at the end of the queue
+                # -----------------------------------------------------------------------
+
+                # Fill queue[ptr:queue_size] with first 'remaining_space' samples
                 self.queue[ptr:].copy_(keys_flat[:remaining_space])
+                self.image_ids[ptr:].copy_(batch_image_ids[:remaining_space])
 
-                # Put the rest at the beginning
+                # -----------------------------------------------------------------------
+                # PART 2: Wrap around to beginning and fill overflow
+                # -----------------------------------------------------------------------
+
+                # Calculate how many samples still need to be placed
                 overflow = total_samples - remaining_space
+
+                # Place overflow samples at the beginning of the queue
                 self.queue[:overflow].copy_(keys_flat[remaining_space:])
+                self.image_ids[:overflow].copy_(batch_image_ids[remaining_space:])
 
-                # Update image IDs
-                self.image_ids[ptr:] = current_id
-                self.image_ids[:overflow] = current_id
 
+                # Update pointer to position after the overflow
                 ptr = overflow
-            else:
-                # Normal case
-                self.queue[ptr:ptr + total_samples].copy_(keys_flat)
-                self.image_ids[ptr:ptr + total_samples] = current_id
-                ptr = ptr + total_samples
 
+            else:
+                # -----------------------------------------------------------------------
+                # NORMAL INCREMENTAL UPDATE: No wrap-around needed
+                # -----------------------------------------------------------------------
+
+                # Simply append all new samples at current pointer position
+                end_pos = ptr + total_samples
+
+                self.queue[ptr:end_pos].copy_(keys_flat)
+                self.image_ids[ptr:end_pos].copy_(batch_image_ids)
+
+                # Update pointer to next available position
+                ptr = end_pos
+
+            # Update the queue pointer for next batch
             self.queue_ptr[0] = ptr
 
-        # Increment image ID for next batch
-        self.current_image_id[0] = current_id + batch_size
+        # ========================================================================================
+        # STEP 5: UPDATE IMAGE ID COUNTER FOR NEXT BATCH
+        # ========================================================================================
+
+        # Increment image ID counter so next batch gets unique IDs
+        # This ensures no ID collision between batches
+        old_image_id = current_id
+        new_image_id = current_id + batch_size
+        self.current_image_id[0] = new_image_id
 
     def get_queue_diversity_stats(self):
         """Get statistics about queue diversity"""
@@ -209,7 +305,10 @@ class DenseContrastiveLoss(nn.Module):
         }
 
     def _dequeue_and_enqueue(self, keys):
-        """Update the memory queue with new keys - FIXED VERSION"""
+        """
+        NOTE: DEPRECATED. Use get_queue_diversity_stats() instead.
+        Update the memory queue with new keys - FIXED VERSION
+        """
         batch_size = keys.shape[0]
         ptr = int(self.queue_ptr)
 

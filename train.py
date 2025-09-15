@@ -332,7 +332,7 @@ class DenseContrastiveTrainer:
             momentum=self.config.get('momentum', 0.999),
             correspondence_features=self.config.get('correspondence_features', 'dense'),
             max_patches_per_image=50,  # Sample 50 patches per image
-            sampling_strategy='random'  # or 'random', 'hardest'
+            sampling_strategy=self.config.get('sampling_strategy', 'random')  # 'random', 'diverse', 'hardest'
         ).to(self.device)
 
         # Loss weight
@@ -928,6 +928,7 @@ if __name__ == "__main__":
                         help='Path to ImageNet_C validation set')
     parser.add_argument('--model-name', type=str, default='vit_tiny_patch16_224', help='Model architecture')
     parser.add_argument('--experiment-name', type=str, default='dense_vit_tiny_baseline1', help='WANDB experiment name')
+    parser.add_argument('--sampling-strategy', type=str, default='random', help='Sampling strategy to design the negative queue. Possible values: random, diverse, hardest')
     parser.add_argument('--num-classes', type=int, default=1000, help='Number of classes')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for evaluation')
     parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
@@ -974,6 +975,7 @@ if __name__ == "__main__":
         'pretrained': args.pretrained,
         'temperature': 0.2,
         'queue_size': args.queue_size,
+        'sampling_strategy': args.sampling_strategy,
         'momentum': 0.999,
 
         # Contrastive learning arguments
