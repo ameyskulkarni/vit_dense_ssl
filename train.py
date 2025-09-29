@@ -938,6 +938,7 @@ if __name__ == "__main__":
     parser.add_argument('--correspondence-features', type=str, default='dense', help='What features to use for correspondence finding. Options: [dense, backbone]')
     parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
     parser.add_argument('--grad-clip', type=float, default=5, help='At what value to clip and scale the gradients')
+    parser.add_argument('--temperature', type=float, default=0.2, help='Temperature scaling')
     parser.add_argument('--learning-rate', type=float, default=0.00001, help='Learning rate')
     parser.add_argument('--ckpt-dir', type=str, default='./models', help='Directory to save results')
     parser.add_argument('--pretrained', type=bool, required=False, default=True, help='If to use deit pretrained weights')
@@ -972,7 +973,7 @@ if __name__ == "__main__":
         'num_workers': args.num_workers,
         'grad_clip': args.grad_clip,
         'pretrained': args.pretrained,
-        'temperature': 0.2,
+        'temperature': args.temperature,
         'queue_size': args.queue_size,
         'sampling_strategy': args.sampling_strategy,
         'momentum': 0.999,
