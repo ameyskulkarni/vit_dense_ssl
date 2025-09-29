@@ -17,8 +17,7 @@ from typing import Dict, Tuple, Optional
 from dense_contrastive_vit_model import DenseContrastiveViT
 from dense_contrastive_loss import DenseContrastiveLoss
 from contrastive_image_dataset import ContrastiveImageDataset
-from sketch_imagenet_dataset_builder import ImageNetSketchDataset
-from dataset_class_matching import ImageNetV2Dataset, ImageNetADataset, ImageNetRDataset
+from dataset_class_matching import ImageNetV2Dataset, ImageNetADataset, ImageNetRDataset, ImageNetSketchDataset
 from compute_similarity_stats import ContrastiveLearningMetrics
 from compute_feature_collapse import compute_feature_rank
 from weight_tracker import WeightTracker
@@ -400,7 +399,7 @@ class DenseContrastiveTrainer:
 
                 if i % 10 == 0:
                     sim_stats = cl_metrics.compute_metrics(queries, positive_keys, neg_sim, pos_sim, correspondence,
-                        corr_features_1, corr_features_2, neg_queue_features)
+                        corr_features_1, corr_features_2, neg_queue_features, self.config.get('temperature', 0.2))
                     effective_rank1, eigenvals1 = compute_feature_rank(dense_features_1)
                     effective_rank2, eigenvals2 = compute_feature_rank(dense_features_2)
                     weight_changes = weight_tracker.track_weight_changes(self.model)
@@ -930,7 +929,7 @@ if __name__ == "__main__":
     parser.add_argument('--experiment-name', type=str, default='dense_vit_tiny_baseline1', help='WANDB experiment name')
     parser.add_argument('--sampling-strategy', type=str, default='random', help='Sampling strategy to design the negative queue. Possible values: random, diverse, hardest')
     parser.add_argument('--num-classes', type=int, default=1000, help='Number of classes')
-    parser.add_argument('--batch-size', type=int, default=64, help='Batch size for evaluation')
+    parser.add_argument('--batch-size', type=int, default=256, help='Batch size for evaluation')
     parser.add_argument('--num-workers', type=int, default=min(4 * torch.cuda.device_count(), os.cpu_count() // 2), help='Number of workers for data loading')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--queue-size', type=int, default=1000, help='Length of neg queue size')
