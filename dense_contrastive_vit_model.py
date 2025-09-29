@@ -47,12 +47,23 @@ class DenseContrastiveViT(nn.Module):
         # )
 
         # Dense Head v2.0
+        # self.dense_projection_head = nn.Sequential(
+        #     nn.Linear(self.embed_dim, self.embed_dim),
+        #     nn.LayerNorm(self.embed_dim),  # ✅ Works with [B, N, D]
+        #     nn.GELU(),  # Better activation for transformers
+        #     nn.Dropout(0.1),
+        #     nn.Linear(self.embed_dim, dense_dim)
+        # )
+
+        # Dense Head v3.0
         self.dense_projection_head = nn.Sequential(
             nn.Linear(self.embed_dim, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),  # ✅ Works with [B, N, D]
-            nn.GELU(),  # Better activation for transformers
-            nn.Dropout(0.1),
-            nn.Linear(self.embed_dim, dense_dim)
+            nn.BatchNorm1d(self.embed_dim),  # BatchNorm helps prevent collapse
+            nn.GELU(),
+            nn.Linear(self.embed_dim, self.embed_dim // 2),
+            nn.BatchNorm1d(self.embed_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.embed_dim // 2, dense_dim),
         )
 
         # Initialize weights
