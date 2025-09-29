@@ -391,9 +391,7 @@ class DenseContrastiveLoss(nn.Module):
         # Update queue with strategically sampled keys
         with torch.no_grad():
             # Sample diverse patches from keys
-            sampled_keys, sampled_indices = self._sample_patches_strategically(
-                keys, B, H, W
-            )
+            sampled_keys, sampled_indices = self._sample_patches_strategically(keys)
 
             # Normalize sampled keys
             sampled_keys = F.normalize(sampled_keys, dim=2)
