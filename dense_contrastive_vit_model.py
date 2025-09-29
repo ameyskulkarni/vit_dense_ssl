@@ -238,6 +238,26 @@ class DenseContrastiveViT(nn.Module):
 
         return x
 
+    def _apply_projection_head(self, patch_tokens):
+        """
+        Apply projection head with proper BatchNorm handling
+        BatchNorm expects [N, C] input, so we need to reshape
+
+        CRITICAL: Must flatten to [B*N, D] before passing through Sequential
+        """
+        B, N, D = patch_tokens.shape
+
+        # Reshape for BatchNorm: [B, N, D] -> [B*N, D]
+        patch_flat = patch_tokens.reshape(-1, D)
+
+        # Apply projection head (now sees [B*N, D] format)
+        dense_features_flat = self.dense_projection_head(patch_flat)
+
+        # Reshape back: [B*N, dense_dim] -> [B, N, dense_dim]
+        dense_features = dense_features_flat.reshape(B, N, -1)
+
+        return dense_features
+
     def forward(self, x, return_dense=True):
         """
         Forward pass
@@ -263,7 +283,7 @@ class DenseContrastiveViT(nn.Module):
             return cls_output
 
         # Dense contrastive features
-        dense_features = self.dense_projection_head(patch_tokens)  # [B, num_patches, dense_dim]
+        dense_features = self._apply_projection_head(patch_tokens)  # [B, num_patches, dense_dim]
 
         # Reshape to spatial grid
         B, N, D = dense_features.shape
