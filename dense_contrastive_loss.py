@@ -30,7 +30,7 @@ class DenseContrastiveLoss(nn.Module):
         # Normalize the queue
         self.queue = F.normalize(self.queue, dim=1)
 
-    def _sample_patches_strategically(self, features, batch_size, height, width):
+    def _sample_patches_strategically(self, features):
         """
         Sample patches strategically to maximize diversity
         Args:
@@ -140,7 +140,7 @@ class DenseContrastiveLoss(nn.Module):
         sampled_patches = patch_features[indices]
         return sampled_patches, indices
 
-    def _dequeue_and_enqueue_diverse(self, keys, batch_size):
+    def _dequeue_and_enqueue(self, keys, batch_size):
         """
         Update the memory queue with diverse negative samples while maintaining proper image ID tracking.
 
@@ -151,7 +151,7 @@ class DenseContrastiveLoss(nn.Module):
         Args:
             keys: [B, max_patches_per_image, D] - Sampled patch features from current batch
                   B = batch_size, max_patches_per_image = patches sampled per image, D = feature dimension
-                  Example: [256, 50, 768] for 256 images, 50 patches each, 768-dim features
+                  Example: [256, 50, 128] for 256 images, 50 patches each, 128-dim features
             batch_size: int - Number of images in the current batch (should match B dimension of keys)
 
         Queue Update Strategy:
@@ -174,8 +174,8 @@ class DenseContrastiveLoss(nn.Module):
         # ========================================================================================
 
         # Convert from per-image structure to flat list of all patches
-        # Input:  [B, max_patches_per_image, D] = [256, 50, 768]
-        # Output: [B * max_patches_per_image, D] = [12800, 768]
+        # Input:  [B, max_patches_per_image, D] = [256, 50, 128]
+        # Output: [B * max_patches_per_image, D] = [12800, 128]
         keys_flat = keys.view(-1, keys.size(-1))
         total_samples = keys_flat.size(0)  # 12800 total patch features
 
@@ -304,42 +304,6 @@ class DenseContrastiveLoss(nn.Module):
             'diversity_ratio': unique_images / total_slots
         }
 
-    def _dequeue_and_enqueue(self, keys):
-        """
-        NOTE: DEPRECATED. Use get_queue_diversity_stats() instead.
-        Update the memory queue with new keys - FIXED VERSION
-        """
-        batch_size = keys.shape[0]
-        ptr = int(self.queue_ptr)
-
-        # Handle case where batch_size > queue_size
-        if batch_size >= self.queue_size:
-            # If we have more keys than queue size, just take the last queue_size keys
-            self.queue.copy_(keys[-self.queue_size:])
-            self.queue_ptr[0] = 0
-            return
-
-        # Handle wrap-around case
-        if ptr + batch_size > self.queue_size:
-            # Split the batch: some goes to end of queue, rest goes to beginning
-            remaining_space = self.queue_size - ptr
-
-            # Fill the remaining space at the end
-            self.queue[ptr:].copy_(keys[:remaining_space])
-
-            # Put the rest at the beginning
-            overflow = batch_size - remaining_space
-            self.queue[:overflow].copy_(keys[remaining_space:])
-
-            # Update pointer
-            ptr = overflow
-        else:
-            # Normal case: enough space in queue
-            self.queue[ptr:ptr + batch_size].copy_(keys)
-            ptr = ptr + batch_size
-
-        self.queue_ptr[0] = ptr
-
     def extract_correspondence(self, f1, f2):
         """
         Extract dense correspondence between two views
@@ -435,6 +399,6 @@ class DenseContrastiveLoss(nn.Module):
             sampled_keys = F.normalize(sampled_keys, dim=2)
 
             # Update queue with diverse samples
-            self._dequeue_and_enqueue_diverse(sampled_keys, B)
+            self._dequeue_and_enqueue(sampled_keys, B)
 
         return loss, pos_sim, neg_sim, queries, positive_keys, correspondence, queue_normalized

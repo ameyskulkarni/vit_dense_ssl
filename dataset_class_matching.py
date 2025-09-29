@@ -1,11 +1,8 @@
 import torch
-import json
-import os
 from torch.utils.data import Dataset
 from torchvision.datasets import ImageFolder
-from torchvision import transforms
+from typing import Dict, Tuple
 from PIL import Image
-from typing import Dict, Tuple, Any
 
 
 class ImageNetV2Dataset(Dataset):
@@ -132,3 +129,31 @@ class ImageNetRDataset(Dataset):
             image = self.transform(image)
 
         return image, v1_class_idx
+
+
+class ImageNetSketchDataset(torch.utils.data.Dataset):
+    def __init__(self, hf_dataset, transform=None):
+        self.dataset = hf_dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        example = self.dataset[idx]
+        image = example["image"]
+        label = example["label"]
+
+        # Ensure the image is in RGB format
+        # Some images in ImageNet-Sketch might be in 'L' (grayscale) mode
+        if hasattr(image, 'mode') and image.mode != 'RGB':
+            image = image.convert('RGB')
+        elif not isinstance(image, Image.Image):
+            # If it's a numpy array or other format, convert to PIL first
+            image = Image.fromarray(image)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+
+        if self.transform:
+            image = self.transform(image)
+        return image, label

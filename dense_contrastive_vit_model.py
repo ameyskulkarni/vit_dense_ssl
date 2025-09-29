@@ -297,37 +297,3 @@ if __name__ == "__main__":
     with torch.no_grad():
         cls_output_eval = model(x, return_dense=False)
         print(f"Evaluation output shape: {cls_output_eval.shape}")
-
-
-
-
-
-    # # Method 4: Manual weight loading from saved checkpoint
-    # print("\n=== Example: Manual checkpoint loading ===")
-    # # Save current model state
-    # checkpoint = {
-    #     'model_state_dict': model.state_dict(),
-    #     'model_config': {
-    #         'model_name': 'vit_small_patch16_224',
-    #         'num_classes': 1000,
-    #         'dense_dim': 128
-    #     }
-    # }
-    #
-    #
-    # # Load model from checkpoint
-    # def load_from_checkpoint(checkpoint_path_or_dict, device='cpu'):
-    #     if isinstance(checkpoint_path_or_dict, dict):
-    #         checkpoint = checkpoint_path_or_dict
-    #     else:
-    #         checkpoint = torch.load(checkpoint_path_or_dict, map_location=device)
-    #
-    #     config = checkpoint['model_config']
-    #     model = DenseContrastiveViT(**config)
-    #     model.load_state_dict(checkpoint['model_state_dict'])
-    #     return model
-    #
-    #
-    # # Example usage
-    # loaded_model = load_from_checkpoint(checkpoint)
-    # print(f"Loaded model with {loaded_model.get_num_params():,} parameters")
