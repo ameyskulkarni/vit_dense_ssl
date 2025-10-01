@@ -63,7 +63,7 @@ class DenseContrastiveViT(nn.Module):
             nn.Linear(self.embed_dim, self.embed_dim // 2),
             nn.BatchNorm1d(self.embed_dim // 2),
             nn.GELU(),
-            nn.Linear(self.embed_dim // 2, dense_dim),
+            nn.Linear(self.embed_dim // 2, self.dense_dim),
         )
 
         # Initialize weights
