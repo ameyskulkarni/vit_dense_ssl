@@ -17,7 +17,9 @@ class DenseContrastiveViT(nn.Module):
                  dense_dim=128,
                  pretrained=False,
                  drop_rate=0.0,
-                 drop_path_rate=0.1
+                 drop_path_rate=0.1,
+                 use_predictor=True,
+                 training=True
                  ):
         super().__init__()
 
@@ -27,6 +29,8 @@ class DenseContrastiveViT(nn.Module):
         self.dense_dim = dense_dim
         self.drop_rate = drop_rate
         self.drop_path_rate = drop_path_rate
+        self.use_predictor = use_predictor
+        self.training = training
 
         self.vit, self.pretrained_checkpoint = self.build_vit()
 
@@ -47,13 +51,44 @@ class DenseContrastiveViT(nn.Module):
         # )
 
         # Dense Head v2.0
+        # self.dense_projection_head = nn.Sequential(
+        #     nn.Linear(self.embed_dim, self.embed_dim),
+        #     nn.LayerNorm(self.embed_dim),  # ✅ Works with [B, N, D]
+        #     nn.GELU(),  # Better activation for transformers
+        #     nn.Dropout(0.1),
+        #     nn.Linear(self.embed_dim, dense_dim)
+        # )
+
+        # Dense Head v3.0 - Industry Standard with Anti-Collapse
+        # Based on SimCLR, MoCo v3, and DINO architectures
         self.dense_projection_head = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),  # ✅ Works with [B, N, D]
-            nn.GELU(),  # Better activation for transformers
-            nn.Dropout(0.1),
-            nn.Linear(self.embed_dim, dense_dim)
+            # First projection layer - expand dimensions
+            nn.Linear(self.embed_dim, self.embed_dim * 2),
+            nn.BatchNorm1d(self.embed_dim * 2),  # BN over feature dimension
+            nn.GELU(),
+
+            # Second hidden layer - maintain high dimensionality
+            nn.Linear(self.embed_dim * 2, self.embed_dim * 2),
+            nn.BatchNorm1d(self.embed_dim * 2),
+            nn.GELU(),
+
+            # Final projection to dense_dim WITHOUT activation
+            nn.Linear(self.embed_dim * 2, dense_dim),
+            # NO BatchNorm or LayerNorm here - this is crucial!
+            # NO activation here - let the representation be unconstrained
         )
+
+        # Predictor head (anti-collapse mechanism from BYOL/SimSiam)
+        # Only used during training, not for the queue
+        self.use_predictor = True  # Set to True to enable
+        if self.use_predictor:
+            self.predictor = nn.Sequential(
+                nn.Linear(dense_dim, dense_dim // 2),
+                nn.BatchNorm1d(dense_dim // 2),
+                nn.GELU(),
+                nn.Linear(dense_dim // 2, dense_dim)
+                # No BN or activation at the end
+            )
 
         # Initialize weights
         self.init_weights()
@@ -251,16 +286,41 @@ class DenseContrastiveViT(nn.Module):
         if not return_dense:
             return cls_output
 
+        # Head v2 calculations
         # Dense contrastive features
-        dense_features = self.dense_projection_head(patch_tokens)  # [B, num_patches, dense_dim]
+        # dense_features = self.dense_projection_head(patch_tokens)  # [B, num_patches, dense_dim]
+        #
+        # # Reshape to spatial grid
+        # B, N, D = dense_features.shape
+        # H = W = self.grid_size
+        # dense_features = dense_features.reshape(B, H, W, D)
+        # backbone_features = patch_tokens.reshape(B, H, W, patch_tokens.shape[-1])
 
-        # Reshape to spatial grid
-        B, N, D = dense_features.shape
+        # Dense head v3 calculations
+        # Dense contrastive features with proper BatchNorm handling
+        B, N, embed_dim = patch_tokens.shape
         H = W = self.grid_size
-        dense_features = dense_features.reshape(B, H, W, D)
-        backbone_features = patch_tokens.reshape(B, H, W, patch_tokens.shape[-1])
 
-        return cls_output, dense_features, backbone_features
+        # Reshape for BatchNorm: [B, N, D] -> [B*N, D]
+        patch_tokens_flat = patch_tokens.reshape(B * N, embed_dim)
+
+        # Apply projection head (BatchNorm expects [B*N, D] format)
+        dense_features_flat = self.dense_projection_head(patch_tokens_flat)  # [B*N, dense_dim]
+
+        # Reshape back to spatial grid: [B*N, D] -> [B, H, W, D]
+        dense_features = dense_features_flat.reshape(B, H, W, self.dense_dim)
+
+        # Also reshape backbone features for correspondence
+        backbone_features = patch_tokens.reshape(B, H, W, embed_dim)
+
+        # Apply predictor if enabled (for training only)
+        if return_dense and self.use_predictor and self.training:
+            # Predictor operates on the projected features
+            dense_features_flat_pred = self.predictor(dense_features_flat)
+            dense_features_pred = dense_features_flat_pred.reshape(B, H, W, self.dense_dim)
+            return cls_output, dense_features, backbone_features, dense_features_pred
+        else:
+            return cls_output, dense_features, backbone_features
 
     def get_num_params(self):
         """Get number of parameters"""

@@ -102,6 +102,8 @@ class DenseContrastiveTrainer:
             drop_rate=self.config.get('drop_rate', 0.0),
             drop_path_rate=self.config.get('drop_path_rate', 0.1),
             pretrained=self.config.get('pretrained', False),
+            use_predictor=self.config.get('use_predictor', True),
+            training=True
         ).to(self.device)
 
         self.logger.info(f"Model created with {self.model.get_num_params():,} parameters")
@@ -295,11 +297,34 @@ class DenseContrastiveTrainer:
 
     def setup_optimizer(self):
         """Setup optimizer and scheduler"""
+
         # AdamW optimizer
+        # v1
+        # self.optimizer = optim.AdamW(
+        #     list(self.model.parameters()) + list(self.dense_contrastive_criterion.parameters()),
+        #     lr=self.config['learning_rate'],
+        #     weight_decay=self.config['weight_decay'],
+        #     betas=(0.9, 0.999)
+        # )
+
+        #v2
+        # Separate parameter groups
+        projection_params = []
+        other_params = []
+
+        for name, param in self.model.named_parameters():
+            if 'dense_projection_head' in name or 'predictor' in name:
+                projection_params.append(param)
+            else:
+                other_params.append(param)
+
         self.optimizer = optim.AdamW(
-            list(self.model.parameters()) + list(self.dense_contrastive_criterion.parameters()),
+            [
+                {'params': other_params, 'weight_decay': self.config['weight_decay']},
+                {'params': projection_params, 'weight_decay': 2*self.config['weight_decay']},  # Higher weight decay
+                {'params': list(self.dense_contrastive_criterion.parameters()), 'weight_decay': 0.0}
+            ],
             lr=self.config['learning_rate'],
-            weight_decay=self.config['weight_decay'],
             betas=(0.9, 0.999)
         )
 
@@ -333,6 +358,7 @@ class DenseContrastiveTrainer:
             max_patches_per_image=50,  # Sample 50 patches per image
             sampling_strategy=self.config.get('sampling_strategy', 'random'),  # 'random', 'diverse', 'hardest'
             learnable_temp=self.config.get('learnable_temp', False),
+            dense_dim=self.config.get('dense_dim', 128),
         ).to(self.device)
 
         # Loss weight
@@ -379,8 +405,8 @@ class DenseContrastiveTrainer:
             # Forward pass
             if self.lambda_weight > 0:
 
-                cls_output_1, dense_features_1, backbone_features_1 = self.model(images_1, return_dense=True)
-                cls_output_2, dense_features_2, backbone_features_2 = self.model(images_2, return_dense=True)
+                cls_output_1, dense_features_1, backbone_features_1, dense_features_pred_1 = self.model(images_1, return_dense=True)
+                cls_output_2, dense_features_2, backbone_features_2, dense_features_pred_2 = self.model(images_2, return_dense=True)
                 # cls_output_1.shape: [64, 1000], dense_features_1.shape: [64, 14, 14, 128]
                 # cls_output_2.shape: [64, 1000], dense_features_2.shape: [64, 14, 14, 128]
 
@@ -389,7 +415,8 @@ class DenseContrastiveTrainer:
                 # In practice, you might want to use features from an earlier layer
                 dense_loss, pos_sim, neg_sim, queries, positive_keys, correspondence, neg_queue_features = self.dense_contrastive_criterion(
                     dense_features_1, dense_features_2,
-                    backbone_features_1, backbone_features_2  # Using same features for correspondence
+                    backbone_features_1, backbone_features_2,  # Using same features for correspondence
+                    dense_features_pred_1, dense_features_pred_2
                 )
                 if self.config.get('correspondence_features', 'dense'):
                     corr_features_1 = dense_features_1
@@ -944,6 +971,7 @@ if __name__ == "__main__":
     parser.add_argument('--learnable-temp', action="store_true", help='Indicates that the temperature value will be learned.')
     parser.add_argument('--temperature', type=float, default=0.2, help='Temperature scaling')
     parser.add_argument('--learning-rate', type=float, default=0.00001, help='Learning rate')
+    parser.add_argument('--dense-dim', type=int, default=128, help='Dense dimension')
     parser.add_argument('--ckpt-dir', type=str, default='./models', help='Directory to save results')
     parser.add_argument('--pretrained', type=bool, required=False, default=True, help='If to use deit pretrained weights')
     parser.add_argument('--model-parallel', type=bool, required=False, default=False, help='If to parallelize the model across GPUs')
@@ -954,7 +982,7 @@ if __name__ == "__main__":
         # Model arch arguments
         'model_name': args.model_name,
         'num_classes': args.num_classes,
-        'dense_dim': 128,
+        'dense_dim': args.dense_dim,
         'model_parallel': args.model_parallel,
 
         # Dataset related arguments
@@ -982,6 +1010,7 @@ if __name__ == "__main__":
         'queue_size': args.queue_size,
         'sampling_strategy': args.sampling_strategy,
         'momentum': 0.999,
+        'use_predictor': True,
 
         # Contrastive learning arguments
         'contrastive_weight_adaptive': args.contrastive_weight_adaptive,

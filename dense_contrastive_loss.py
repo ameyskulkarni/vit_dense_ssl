@@ -10,14 +10,14 @@ class DenseContrastiveLoss(nn.Module):
     """
 
     def __init__(self, temperature=0.2, queue_size=65536, momentum=0.999, correspondence_features='dense', max_patches_per_image=50,
-                 sampling_strategy='random', learnable_temp=False):
+                 sampling_strategy='random', learnable_temp=False, dense_dim=128):
         super().__init__()
         self.queue_size = queue_size
         self.momentum = momentum
         self.correspondence_features = correspondence_features
         self.max_patches_per_image = max_patches_per_image
         self.sampling_strategy = sampling_strategy  # 'random', 'diverse', or 'hardest'
-
+        self.dense_dim = dense_dim
         # Initialize temperature
         self.learnable_temp = learnable_temp
         if self.learnable_temp:
@@ -29,7 +29,7 @@ class DenseContrastiveLoss(nn.Module):
             self._fixed_temperature = temperature
 
         # Initialize memory queue
-        self.register_buffer("queue", torch.randn(queue_size, 128))
+        self.register_buffer("queue", torch.randn(queue_size, self.dense_dim))
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
         # Track image diversity in queue
@@ -355,7 +355,7 @@ class DenseContrastiveLoss(nn.Module):
 
         return correspondence
 
-    def forward(self, dense_features_1, dense_features_2, backbone_features_1, backbone_features_2):
+    def forward(self, dense_features_1, dense_features_2, backbone_features_1, backbone_features_2, dense_features_1_pred=None, dense_features_2_pred=None):
         """
         Compute dense contrastive loss
         Args:
@@ -374,7 +374,11 @@ class DenseContrastiveLoss(nn.Module):
             sys.exit(1)
 
         # Flatten dense features
-        queries = dense_features_1.view(B, H * W, D)  # [B, H*W, D]
+        # Use predictor outputs as queries if provided
+        if dense_features_1_pred is not None:
+            queries = dense_features_1_pred.view(B, H * W, D)
+        else:
+            queries = dense_features_1.view(B, H * W, D)
         keys = dense_features_2.view(B, H * W, D)  # [B, H*W, D]
 
         # Normalize features
