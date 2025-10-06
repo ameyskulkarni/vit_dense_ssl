@@ -55,8 +55,8 @@ class DenseContrastiveTrainer:
         self.setup_device()
         self.setup_model()
         self.setup_data()
-        self.setup_optimizer()
         self.setup_criterion()
+        self.setup_optimizer()
         # Initialize wandb if enabled
         self.init_wandb()
 
@@ -297,7 +297,7 @@ class DenseContrastiveTrainer:
         """Setup optimizer and scheduler"""
         # AdamW optimizer
         self.optimizer = optim.AdamW(
-            self.model.parameters(),
+            list(self.model.parameters()) + list(self.dense_contrastive_criterion.parameters()),
             lr=self.config['learning_rate'],
             weight_decay=self.config['weight_decay'],
             betas=(0.9, 0.999)
@@ -331,7 +331,8 @@ class DenseContrastiveTrainer:
             momentum=self.config.get('momentum', 0.999),
             correspondence_features=self.config.get('correspondence_features', 'dense'),
             max_patches_per_image=50,  # Sample 50 patches per image
-            sampling_strategy=self.config.get('sampling_strategy', 'random')  # 'random', 'diverse', 'hardest'
+            sampling_strategy=self.config.get('sampling_strategy', 'random'),  # 'random', 'diverse', 'hardest'
+            learnable_temp=self.config.get('learnable_temp', False),
         ).to(self.device)
 
         # Loss weight
@@ -398,19 +399,21 @@ class DenseContrastiveTrainer:
                     corr_features_2 = backbone_features_2
 
                 if i % 10 == 0:
+                    temp = self.dense_contrastive_criterion.get_temperature_value()
                     sim_stats = cl_metrics.compute_metrics(queries, positive_keys, neg_sim, pos_sim, correspondence,
-                        corr_features_1, corr_features_2, neg_queue_features, self.config.get('temperature', 0.2))
+                        corr_features_1, corr_features_2, neg_queue_features, temp)
                     effective_rank1, eigenvals1 = compute_feature_rank(dense_features_1)
                     effective_rank2, eigenvals2 = compute_feature_rank(dense_features_2)
                     weight_changes = weight_tracker.track_weight_changes(self.model)
                     diversity_stats = self.dense_contrastive_criterion.get_queue_diversity_stats()
                     training_analysis_metric.update(sim_stats)
                     training_analysis_metric.update(weight_changes)
-                    training_analysis_metric['feature_collapse/effective_rank1'] = effective_rank1
-                    training_analysis_metric['feature_collapse/eigenvals1'] = eigenvals1
-                    training_analysis_metric['feature_collapse/effective_rank2'] = effective_rank2
-                    training_analysis_metric['feature_collapse/eigenvals2'] = eigenvals2
+                    training_analysis_metric['feature_collapse/effective_rank1_n'] = effective_rank1
+                    training_analysis_metric['feature_collapse/eigenvals1_n'] = eigenvals1
+                    training_analysis_metric['feature_collapse/effective_rank2_n'] = effective_rank2
+                    training_analysis_metric['feature_collapse/eigenvals2_n'] = eigenvals2
                     training_analysis_metric['feature_diversity_stats/unique_images_in_queue'] = diversity_stats['unique_images_in_queue']
+                    training_analysis_metric['train/temperature'] = temp
             else:
                 # Skip dense computations entirely
                 cls_output_1 = self.model(images_1, return_dense=False)  # or just self.model(images_1)
@@ -938,6 +941,7 @@ if __name__ == "__main__":
     parser.add_argument('--correspondence-features', type=str, default='dense', help='What features to use for correspondence finding. Options: [dense, backbone]')
     parser.add_argument('--lambda-weight', type=float, default=0.5, help='Lambda to weight class and dense loss. If 0, total loss = class loss, If 1, total loss = dense loss')
     parser.add_argument('--grad-clip', type=float, default=5, help='At what value to clip and scale the gradients')
+    parser.add_argument('--learnable-temp', action="store_true", help='Indicates that the temperature value will be learned.')
     parser.add_argument('--temperature', type=float, default=0.2, help='Temperature scaling')
     parser.add_argument('--learning-rate', type=float, default=0.00001, help='Learning rate')
     parser.add_argument('--ckpt-dir', type=str, default='./models', help='Directory to save results')
@@ -973,6 +977,7 @@ if __name__ == "__main__":
         'num_workers': args.num_workers,
         'grad_clip': args.grad_clip,
         'pretrained': args.pretrained,
+        'learnable_temp': args.learnable_temp,
         'temperature': args.temperature,
         'queue_size': args.queue_size,
         'sampling_strategy': args.sampling_strategy,

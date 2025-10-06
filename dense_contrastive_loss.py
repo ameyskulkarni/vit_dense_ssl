@@ -10,14 +10,23 @@ class DenseContrastiveLoss(nn.Module):
     """
 
     def __init__(self, temperature=0.2, queue_size=65536, momentum=0.999, correspondence_features='dense', max_patches_per_image=50,
-                 sampling_strategy='random'):
+                 sampling_strategy='random', learnable_temp=False):
         super().__init__()
-        self.temperature = temperature
         self.queue_size = queue_size
         self.momentum = momentum
         self.correspondence_features = correspondence_features
         self.max_patches_per_image = max_patches_per_image
         self.sampling_strategy = sampling_strategy  # 'random', 'diverse', or 'hardest'
+
+        # Initialize temperature
+        self.learnable_temp = learnable_temp
+        if self.learnable_temp:
+            # Initialize as log(temperature) for numerical stability
+            # We'll use exp to ensure temperature is always positive
+            init_log_temp = torch.log(torch.tensor(temperature))
+            self.log_temperature = nn.Parameter(init_log_temp)
+        else:
+            self._fixed_temperature = temperature
 
         # Initialize memory queue
         self.register_buffer("queue", torch.randn(queue_size, 128))
@@ -29,6 +38,20 @@ class DenseContrastiveLoss(nn.Module):
 
         # Normalize the queue
         self.queue = F.normalize(self.queue, dim=1)
+
+    @property
+    def temperature(self):
+        if self.learnable_temp:
+            return torch.exp(self.log_temperature)
+        else:
+            return self._fixed_temperature
+
+    def get_temperature_value(self):
+        if self.learnable_temp:
+            with torch.no_grad():
+                return torch.exp(self.log_temperature).item()
+        else:
+            return self._fixed_temperature
 
     def _sample_patches_strategically(self, features):
         """
