@@ -19,7 +19,7 @@ from dense_contrastive_loss import DenseContrastiveLoss
 from contrastive_image_dataset import ContrastiveImageDataset
 from dataset_class_matching import ImageNetV2Dataset, ImageNetADataset, ImageNetRDataset, ImageNetSketchDataset
 from compute_similarity_stats import ContrastiveLearningMetrics
-from compute_feature_collapse import compute_feature_rank
+from compute_feature_collapse import compute_feature_rank_v1, compute_feature_rank_v2
 from weight_tracker import WeightTracker
 
 
@@ -400,8 +400,10 @@ class DenseContrastiveTrainer:
                 if i % 10 == 0:
                     sim_stats = cl_metrics.compute_metrics(queries, positive_keys, neg_sim, pos_sim, correspondence,
                         corr_features_1, corr_features_2, neg_queue_features, self.config.get('temperature', 0.2))
-                    effective_rank1, eigenvals1 = compute_feature_rank(dense_features_1)
-                    effective_rank2, eigenvals2 = compute_feature_rank(dense_features_2)
+                    effective_rank1, eigenvals1 = compute_feature_rank_v1(dense_features_1)
+                    effective_rank2, eigenvals2 = compute_feature_rank_v1(dense_features_2)
+                    effective_rank1_n, eigenvals1_n = compute_feature_rank_v2(dense_features_1)
+                    effective_rank2_n, eigenvals2_n = compute_feature_rank_v2(dense_features_2)
                     weight_changes = weight_tracker.track_weight_changes(self.model)
                     diversity_stats = self.dense_contrastive_criterion.get_queue_diversity_stats()
                     training_analysis_metric.update(sim_stats)
@@ -410,6 +412,10 @@ class DenseContrastiveTrainer:
                     training_analysis_metric['feature_collapse/eigenvals1'] = eigenvals1
                     training_analysis_metric['feature_collapse/effective_rank2'] = effective_rank2
                     training_analysis_metric['feature_collapse/eigenvals2'] = eigenvals2
+                    training_analysis_metric['feature_collapse/effective_rank1_n'] = effective_rank1_n
+                    training_analysis_metric['feature_collapse/eigenvals1_n'] = eigenvals1_n
+                    training_analysis_metric['feature_collapse/effective_rank2_n'] = effective_rank2_n
+                    training_analysis_metric['feature_collapse/eigenvals2_n'] = eigenvals2_n
                     training_analysis_metric['feature_diversity_stats/unique_images_in_queue'] = diversity_stats['unique_images_in_queue']
             else:
                 # Skip dense computations entirely
