@@ -5,7 +5,7 @@ from timm.models.vision_transformer import VisionTransformer, _cfg
 from timm.models.layers import trunc_normal_
 import math
 
-class DenseContrastiveViT(nn.Module):
+class ContrastiveViT(nn.Module):
     """
     Vision Transformer with Dense Contrastive Learning
     Combines classification and dense contrastive learning objectives
@@ -17,7 +17,8 @@ class DenseContrastiveViT(nn.Module):
                  dense_dim=128,
                  pretrained=False,
                  drop_rate=0.0,
-                 drop_path_rate=0.1
+                 drop_path_rate=0.1,
+                 cl_mode='dense'  # NEW: 'dense', 'global', or 'none'
                  ):
         super().__init__()
 
@@ -27,6 +28,11 @@ class DenseContrastiveViT(nn.Module):
         self.dense_dim = dense_dim
         self.drop_rate = drop_rate
         self.drop_path_rate = drop_path_rate
+        self.cl_mode = cl_mode
+
+        # Validate cl_mode
+        if cl_mode not in ['dense', 'global', 'none']:
+            raise ValueError(f"cl_mode must be 'dense', 'global', or 'none', got {cl_mode}")
 
         self.vit, self.pretrained_checkpoint = self.build_vit()
 
@@ -38,22 +44,35 @@ class DenseContrastiveViT(nn.Module):
         # Classification head
         self.classification_head = nn.Linear(self.embed_dim, num_classes)
 
-        # Dense projection head for contrastive learning
-        # Dense Head v1.0
-        # self.dense_projection_head = nn.Sequential(
-        #     nn.Linear(self.embed_dim, 2048),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(2048, dense_dim)
-        # )
+        # Dense projection head (only for dense CL mode)
+        if cl_mode in ['dense']:
+            # Dense projection head for contrastive learning
+            # Dense Head v1.0
+            # self.dense_projection_head = nn.Sequential(
+            #     nn.Linear(self.embed_dim, 2048),
+            #     nn.ReLU(inplace=True),
+            #     nn.Linear(2048, dense_dim)
+            # )
 
-        # Dense Head v2.0
-        self.dense_projection_head = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),  # ✅ Works with [B, N, D]
-            nn.GELU(),  # Better activation for transformers
-            nn.Dropout(0.1),
-            nn.Linear(self.embed_dim, dense_dim)
-        )
+            # Dense Head v2.0
+            self.dense_projection_head = nn.Sequential(
+                nn.Linear(self.embed_dim, self.embed_dim),
+                nn.LayerNorm(self.embed_dim),  # ✅ Works with [B, N, D]
+                nn.GELU(),  # Better activation for transformers
+                nn.Dropout(0.1),
+                nn.Linear(self.embed_dim, dense_dim)
+            )
+
+        # Global projection head (only for global CL mode)
+        if cl_mode in ['global']:
+            # Global projection head
+            self.global_projection_head = nn.Sequential(
+                nn.Linear(self.embed_dim, self.embed_dim),
+                nn.LayerNorm(self.embed_dim),
+                nn.GELU(),
+                nn.Dropout(0.1),
+                nn.Linear(self.embed_dim, dense_dim)  # Reuse dense_dim for consistency
+            )
 
         # Initialize weights
         self.init_weights()
@@ -62,6 +81,7 @@ class DenseContrastiveViT(nn.Module):
         print(f"Model params are: ")
         print(f"Model name: {self.model_name}")
         print(f"Pretrained: {self.pretrained}")
+        print(f"Contrastive Learning Mode: {self.cl_mode}")
         print(f"------------------------------------------------------")
 
     def build_vit(self):
@@ -227,16 +247,26 @@ class DenseContrastiveViT(nn.Module):
 
         return x
 
-    def forward(self, x, return_dense=True):
+    def forward(self, x, return_dense=True, return_global=False):
         """
         Forward pass
         Args:
             x: Input images [B, C, H, W]
+            return_dense: Whether to return features for CL (behavior depends on cl_mode)
             return_dense: Whether to return dense features for contrastive learning
+            return_global: Whether to return global features for global CL
 
         Returns:
             cls_output: Classification logits [B, num_classes]
             dense_features: Dense features [B, H, W, dense_dim] (if return_dense=True)
+            global_features: Global features [B, dense_dim] (if return_global=True)
+            backbone_features: Patch tokens [B, H, W, embed_dim] (if return_dense=True)
+            If cl_mode='dense':
+                cls_output, dense_features, backbone_features
+            If cl_mode='global':
+                cls_output, global_features
+            If cl_mode='none':
+                cls_output
         """
         # Extract features
         features = self.forward_features(x)  # [B, 1+num_patches, embed_dim]
@@ -248,19 +278,25 @@ class DenseContrastiveViT(nn.Module):
         # Classification output
         cls_output = self.classification_head(cls_token)
 
-        if not return_dense:
+        if not return_dense or self.cl_mode == 'none':
             return cls_output
 
-        # Dense contrastive features
-        dense_features = self.dense_projection_head(patch_tokens)  # [B, num_patches, dense_dim]
+        if self.cl_mode == 'dense':
+            # Dense contrastive features
+            dense_features = self.dense_projection_head(patch_tokens)  # [B, num_patches, dense_dim]
 
-        # Reshape to spatial grid
-        B, N, D = dense_features.shape
-        H = W = self.grid_size
-        dense_features = dense_features.reshape(B, H, W, D)
-        backbone_features = patch_tokens.reshape(B, H, W, patch_tokens.shape[-1])
+            # Reshape to spatial grid
+            B, N, D = dense_features.shape
+            H = W = self.grid_size
+            dense_features = dense_features.reshape(B, H, W, D)
+            backbone_features = patch_tokens.reshape(B, H, W, patch_tokens.shape[-1])
 
-        return cls_output, dense_features, backbone_features
+            return cls_output, dense_features, backbone_features
+
+        elif self.cl_mode == 'global':
+            # Global contrastive features from CLS token
+            global_features = self.global_projection_head(cls_token)  # [B, dense_dim]
+            return cls_output, global_features
 
     def get_num_params(self):
         """Get number of parameters"""
@@ -269,8 +305,8 @@ class DenseContrastiveViT(nn.Module):
 
 
 def create_model(model_name='vit_tiny_patch16_224', num_classes=1000, pretrained=True, **kwargs):
-    """Factory function to create DenseContrastiveViT model"""
-    return DenseContrastiveViT(
+    """Factory function to create ContrastiveViT model"""
+    return ContrastiveViT(
         model_name=model_name,
         num_classes=num_classes,
         pretrained=pretrained,
