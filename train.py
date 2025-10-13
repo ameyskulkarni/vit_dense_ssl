@@ -425,7 +425,7 @@ class DenseContrastiveTrainer:
                     corr_features_1 = backbone_features_1
                     corr_features_2 = backbone_features_2
 
-                if i % 10 == 0:
+                if i % self.config.get('log_interval', 100) == 0 or i == 1:
                     temp = self.dense_contrastive_criterion.get_temperature_value()
                     sim_stats = cl_metrics.compute_metrics(queries, positive_keys, neg_sim, pos_sim, correspondence,
                         corr_features_1, corr_features_2, neg_queue_features, temp)
@@ -473,7 +473,7 @@ class DenseContrastiveTrainer:
             total_loss.backward()
 
             # Logging dense head gradients.
-            if i % 10 == 0:
+            if i % self.config.get('log_interval', 100) == 0:
                 for name, param in self.model.dense_projection_head.named_parameters():
                     if param.grad is not None:
                         training_analysis_metric[f'gradients/before_clip_dense_head_{name}_norm'] = param.grad.detach().data.norm(2)
@@ -486,7 +486,7 @@ class DenseContrastiveTrainer:
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
 
             # Logging dense head gradients after gradient clipping.
-            if i % 10 == 0:
+            if i % self.config.get('log_interval', 100) == 0:
                 for name, param in self.model.dense_projection_head.named_parameters():
                     if param.grad is not None:
                         training_analysis_metric[f'gradients/after_clip_dense_head_{name}_norm'] = param.grad.detach().data.norm(2)
@@ -531,7 +531,7 @@ class DenseContrastiveTrainer:
                     'train/grad_norm': grad_norm,
                     'epoch': epoch
                 })
-                if i % 10 == 0:
+                if i % self.config.get('log_interval', 100) == 0:
                     wandb.log(training_analysis_metric)
 
         return {
@@ -973,9 +973,9 @@ if __name__ == "__main__":
     parser.add_argument('--learning-rate', type=float, default=0.00001, help='Learning rate')
     parser.add_argument('--dense-dim', type=int, default=128, help='Dense dimension')
     parser.add_argument('--ckpt-dir', type=str, default='./models', help='Directory to save results')
-    parser.add_argument('--pretrained', type=bool, required=False, default=True, help='If to use deit pretrained weights')
+    parser.add_argument('--no-pretrained', action="store_true", help='If specified, do not load pretrained weights')
     parser.add_argument('--model-parallel', type=bool, required=False, default=False, help='If to parallelize the model across GPUs')
-
+    parser.add_argument('--log-interval', type=int, default=100, help='Log wandb interval')
     args = parser.parse_args()
     # Configuration
     config = {
@@ -1004,7 +1004,7 @@ if __name__ == "__main__":
         'drop_path_rate': 0.1,
         'num_workers': args.num_workers,
         'grad_clip': args.grad_clip,
-        'pretrained': args.pretrained,
+        'pretrained': not args.no_pretrained,
         'learnable_temp': args.learnable_temp,
         'temperature': args.temperature,
         'queue_size': args.queue_size,
@@ -1021,7 +1021,7 @@ if __name__ == "__main__":
         'use_wandb': True,
         'wandb_project': 'dense-contrastive-vit',
         'experiment_name': args.experiment_name,
-        'log_interval': 100,
+        'log_interval': args.log_interval,
         'no_log_baseline_res': args.no_log_baseline_res,
 
     }
