@@ -4,12 +4,12 @@ import os
 from collections import OrderedDict
 
 
-def convert_dense_contrastive_vit_to_deit(checkpoint_path, output_path, model_name='vit_tiny_patch16_224'):
+def convert_contrastive_vit_to_deit(checkpoint_path, output_path, model_name='vit_tiny_patch16_224'):
     """
-    Convert DenseContrastiveViT checkpoint to standard DeiT checkpoint format
+    Convert ContrastiveViT checkpoint to standard DeiT checkpoint format
 
     Args:
-        checkpoint_path: Path to the DenseContrastiveViT checkpoint
+        checkpoint_path: Path to the ContrastiveViT checkpoint
         output_path: Path where to save the converted DeiT checkpoint
         model_name: Model architecture name
     """
@@ -32,7 +32,7 @@ def convert_dense_contrastive_vit_to_deit(checkpoint_path, output_path, model_na
     # Create new state dict for DeiT format
     deit_state_dict = OrderedDict()
 
-    # Mapping from DenseContrastiveViT keys to DeiT keys
+    # Mapping from ContrastiveViT keys to DeiT keys
     key_mapping = {
         # ViT backbone mappings
         'vit.patch_embed.proj.weight': 'patch_embed.proj.weight',
@@ -66,9 +66,12 @@ def convert_dense_contrastive_vit_to_deit(checkpoint_path, output_path, model_na
         elif old_key.startswith('vit.'):
             new_key = old_key.replace('vit.', '')
 
-        # Skip dense projection head and other custom components
+        # Skip contrastive projection head and other custom components
         elif old_key.startswith('dense_projection_head.'):
             print(f"Skipping dense projection head key: {old_key}")
+            continue
+        elif old_key.startswith('global_projection_head.'):
+            print(f"Skipping global projection head key: {old_key}")
             continue
 
         # Skip any other custom keys
@@ -166,9 +169,9 @@ def verify_checkpoint_compatibility(checkpoint_path, model_name='vit_tiny_patch1
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Convert DenseContrastiveViT checkpoint to DeiT format')
+    parser = argparse.ArgumentParser(description='Convert ContrastiveViT checkpoint to DeiT format')
     parser.add_argument('--input', '-i', type=str, required=True,
-                        help='Path to input DenseContrastiveViT checkpoint')
+                        help='Path to input ContrastiveViT checkpoint')
     parser.add_argument('--output', '-o', type=str, required=True,
                         help='Path to output DeiT checkpoint')
     parser.add_argument('--model_name', '-m', type=str, default='vit_tiny_patch16_224',
@@ -191,7 +194,7 @@ def main():
 
     # Convert the checkpoint
     try:
-        convert_dense_contrastive_vit_to_deit(args.input, args.output, args.model_name)
+        convert_contrastive_vit_to_deit(args.input, args.output, args.model_name)
 
         # Verify if requested
         if args.verify:
@@ -210,12 +213,12 @@ if __name__ == "__main__":
         # Example usage for demonstration
         print("Example usage:")
         print(
-            "python dense_vit_to_deit_format.py -i model_checkpoint.pth -o deit_checkpoint.pth -m vit_tiny_patch16_224 --verify")
+            "python contrastive_vit_to_deit_format.py -i model_checkpoint.pth -o deit_checkpoint.pth -m vit_tiny_patch16_224 --verify")
         print("\nYou can also use it programmatically:")
 
         # Programmatic example (uncomment to use)
-        # convert_dense_contrastive_vit_to_deit(
-        #     checkpoint_path='path/to/your/dense_contrastive_vit_checkpoint.pth',
+        # convert_contrastive_vit_to_deit(
+        #     checkpoint_path='path/to/your/contrastive_vit_checkpoint.pth',
         #     output_path='path/to/output/deit_checkpoint.pth',
         #     model_name='vit_tiny_patch16_224'
         # )

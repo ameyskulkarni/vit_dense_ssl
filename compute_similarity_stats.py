@@ -10,19 +10,13 @@ class ContrastiveLearningMetrics:
     def __init__(self):
         self.step = 0
 
-    def compute_metrics(self, queries, positive_keys, neg_sim, pos_sim, correspondence,
-                        corr_features_1, corr_features_2, neg_queue_features=None, temperature=0.2):
+    def compute_metrics(self, neg_sim, pos_sim, temperature=0.2):
         """
         Compute comprehensive contrastive learning metrics
 
         Args:
-            queries: [B*H*W, D] - query features
-            positive_keys: [B*H*W, D] - positive key features
             neg_sim: [B*H*W, queue_size] - negative similarities
             pos_sim: [B*H*W] - positive similarities
-            correspondence: [B, H*W] - correspondence indices
-            corr_features_1/2: [B, H, W, D] - original spatial features
-            neg_queue_features: [queue_size, D] - features in negative queue
             temperature: float - temperature parameter used in loss
         """
         metrics = {}

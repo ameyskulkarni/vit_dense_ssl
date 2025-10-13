@@ -14,8 +14,9 @@ from tqdm import tqdm
 import argparse
 from typing import Dict, Tuple, Optional
 
-from dense_contrastive_vit_model import DenseContrastiveViT
+from contrastive_vit_model import ContrastiveViT
 from dense_contrastive_loss import DenseContrastiveLoss
+from global_contrastive_loss import GlobalContrastiveLoss
 from contrastive_image_dataset import ContrastiveImageDataset
 from dataset_class_matching import ImageNetV2Dataset, ImageNetADataset, ImageNetRDataset, ImageNetSketchDataset
 from compute_similarity_stats import ContrastiveLearningMetrics
@@ -48,7 +49,7 @@ class AverageMeter:
         return fmtstr.format(**self.__dict__)
 
 
-class DenseContrastiveTrainer:
+class ContrastiveTrainer:
     def __init__(self, config: Dict):
         self.config = config
         self.setup_logging()
@@ -95,13 +96,14 @@ class DenseContrastiveTrainer:
 
     def setup_model(self):
         """Setup model architecture"""
-        self.model = DenseContrastiveViT(
+        self.model = ContrastiveViT(
             model_name=self.config['model_name'],
             num_classes=self.config['num_classes'],
             dense_dim=self.config['dense_dim'],
             drop_rate=self.config.get('drop_rate', 0.0),
             drop_path_rate=self.config.get('drop_path_rate', 0.1),
             pretrained=self.config.get('pretrained', False),
+            cl_mode=self.config.get('cl_mode', 'dense'),
         ).to(self.device)
 
         self.logger.info(f"Model created with {self.model.get_num_params():,} parameters")
@@ -295,9 +297,16 @@ class DenseContrastiveTrainer:
 
     def setup_optimizer(self):
         """Setup optimizer and scheduler"""
-        # AdamW optimizer
+        param_groups = list(self.model.parameters())
+
+        # Add contrastive loss criterion parameters
+        if self.cl_mode == 'dense':
+            param_groups += list(self.dense_contrastive_criterion.parameters())
+        elif self.cl_mode == 'global':
+            param_groups += list(self.global_contrastive_criterion.parameters())
+
         self.optimizer = optim.AdamW(
-            list(self.model.parameters()) + list(self.dense_contrastive_criterion.parameters()),
+            param_groups,
             lr=self.config['learning_rate'],
             weight_decay=self.config['weight_decay'],
             betas=(0.9, 0.999)
@@ -324,19 +333,38 @@ class DenseContrastiveTrainer:
         # Classification loss
         self.classification_criterion = nn.CrossEntropyLoss()
 
-        # Dense contrastive loss
-        self.dense_contrastive_criterion = DenseContrastiveLoss(
-            temperature=self.config.get('temperature', 0.2),
-            queue_size=self.config.get('queue_size', 65536),
-            momentum=self.config.get('momentum', 0.999),
-            correspondence_features=self.config.get('correspondence_features', 'dense'),
-            max_patches_per_image=50,  # Sample 50 patches per image
-            sampling_strategy=self.config.get('sampling_strategy', 'random'),  # 'random', 'diverse', 'hardest'
-            learnable_temp=self.config.get('learnable_temp', False),
-            dense_dim=self.config.get('dense_dim', 128),
-        ).to(self.device)
+        # Determine contrastive learning mode
+        self.cl_mode = self.config.get('cl_mode', 'dense')  # 'dense', 'global', or 'none'
 
-        # Loss weight
+        if self.cl_mode not in ['dense', 'global', 'none']:
+            raise ValueError(f"cl_mode must be 'dense', 'global', or 'none', got {self.cl_mode}")
+
+        self.logger.info(f"Contrastive Learning Mode: {self.cl_mode}")
+
+        if self.cl_mode == 'dense':
+            # Dense contrastive loss
+            self.dense_contrastive_criterion = DenseContrastiveLoss(
+                temperature=self.config.get('temperature', 0.2),
+                queue_size=self.config.get('queue_size', 65536),
+                momentum=self.config.get('momentum', 0.999),
+                correspondence_features=self.config.get('correspondence_features', 'dense'),
+                max_patches_per_image=50,  # Sample 50 patches per image
+                sampling_strategy=self.config.get('sampling_strategy', 'random'),  # 'random', 'diverse', 'hardest'
+                learnable_temp=self.config.get('learnable_temp', False),
+                dense_dim=self.config.get('dense_dim', 128),
+            ).to(self.device)
+
+        elif self.cl_mode == 'global':
+            # Global contrastive loss (new)
+            self.global_contrastive_criterion = GlobalContrastiveLoss(
+                temperature=self.config.get('temperature', 0.2),
+                queue_size=self.config.get('queue_size', 65536),
+                momentum=self.config.get('momentum', 0.999),
+                learnable_temp=self.config.get('learnable_temp', False),
+                dense_dim=self.config.get('dense_dim', 128),
+            ).to(self.device)
+
+        # Loss weight (applies to both dense and global CL)
         self.lambda_weight = self.config.get('lambda_weight', 0.5)
 
     def get_global_grad_norm(self):
@@ -358,6 +386,8 @@ class DenseContrastiveTrainer:
         losses = AverageMeter('Loss', ':.4e')
         cls_losses = AverageMeter('ClsLoss', ':.4e')
         dense_losses = AverageMeter('DenseLoss', ':.4e')
+        global_losses = AverageMeter('GlobalLoss', ':.4e')
+        adaptive_lambda = None
         top1 = AverageMeter('Acc@1', ':6.2f')
         top5 = AverageMeter('Acc@5', ':6.2f')
 
@@ -378,7 +408,32 @@ class DenseContrastiveTrainer:
             targets = targets.to(self.device, non_blocking=True)
 
             # Forward pass
-            if self.lambda_weight > 0:
+            if self.cl_mode == 'global':
+                # Global contrastive learning mode
+                cls_output_1, global_features_1 = self.model(images_1, return_dense=True)
+                cls_output_2, global_features_2 = self.model(images_2, return_dense=True)
+
+                global_loss, pos_sim, neg_sim = self.global_contrastive_criterion(
+                    global_features_1, global_features_2
+                )
+                contrastive_loss = global_loss
+
+                # Logging for global CL
+                if i % self.config.get('log_interval', 100) == 0:
+                    temp = self.global_contrastive_criterion.get_temperature_value()
+                    sim_stats = cl_metrics.compute_metrics(neg_sim, pos_sim, temp)
+                    effective_rank1, eigenvals1 = compute_feature_rank(global_features_1)
+                    effective_rank2, eigenvals2 = compute_feature_rank(global_features_2)
+                    weight_changes = weight_tracker.track_weight_changes(self.model)
+                    training_analysis_metric.update(sim_stats)
+                    training_analysis_metric.update(weight_changes)
+                    training_analysis_metric['feature_collapse/effective_rank1_n'] = effective_rank1
+                    training_analysis_metric['feature_collapse/eigenvals1_n'] = eigenvals1
+                    training_analysis_metric['feature_collapse/effective_rank2_n'] = effective_rank2
+                    training_analysis_metric['feature_collapse/eigenvals2_n'] = eigenvals2
+                    training_analysis_metric['train/temperature'] = temp
+
+            elif self.cl_mode == 'dense':
 
                 cls_output_1, dense_features_1, backbone_features_1 = self.model(images_1, return_dense=True)
                 cls_output_2, dense_features_2, backbone_features_2 = self.model(images_2, return_dense=True)
@@ -399,10 +454,11 @@ class DenseContrastiveTrainer:
                     corr_features_1 = backbone_features_1
                     corr_features_2 = backbone_features_2
 
+                contrastive_loss = dense_loss
+
                 if i % self.config.get('log_interval', 100) == 0:
                     temp = self.dense_contrastive_criterion.get_temperature_value()
-                    sim_stats = cl_metrics.compute_metrics(queries, positive_keys, neg_sim, pos_sim, correspondence,
-                        corr_features_1, corr_features_2, neg_queue_features, temp)
+                    sim_stats = cl_metrics.compute_metrics(neg_sim, pos_sim, temp)
                     effective_rank1, eigenvals1 = compute_feature_rank(dense_features_1)
                     effective_rank2, eigenvals2 = compute_feature_rank(dense_features_2)
                     weight_changes = weight_tracker.track_weight_changes(self.model)
@@ -415,32 +471,33 @@ class DenseContrastiveTrainer:
                     training_analysis_metric['feature_collapse/eigenvals2_n'] = eigenvals2
                     training_analysis_metric['feature_diversity_stats/unique_images_in_queue'] = diversity_stats['unique_images_in_queue']
                     training_analysis_metric['train/temperature'] = temp
-            else:
-                # Skip dense computations entirely
+            else: # cl_mode == 'none'
+                # No contrastive learning
+                # Skip all contrastive computations entirely
                 cls_output_1 = self.model(images_1, return_dense=False)  # or just self.model(images_1)
                 cls_output_2 = self.model(images_2, return_dense=False)
-                dense_loss = 0
+                contrastive_loss = 0
 
             # Classification loss (using both views)
             cls_loss = (self.classification_criterion(cls_output_1, targets) +
                         self.classification_criterion(cls_output_2, targets)) / 2
 
-
-
             # Total loss
-            if self.config.get('contrastive_weight_adaptive', False):
-                # Start with classification-focused training
-                warmup_target = 0.2 * self.lambda_weight
-                if epoch < self.warmup_epochs:
-                    adaptive_lambda = warmup_target * ((epoch + 1) / self.warmup_epochs)  # First warmup epochs: 0 -> 20% of self.lambda (upperbound)
+            if self.cl_mode != 'none':
+                if self.config.get('contrastive_weight_adaptive', False):
+                    warmup_target = 0.2 * self.lambda_weight
+                    if epoch < self.warmup_epochs:
+                        adaptive_lambda = warmup_target * ((epoch + 1) / self.warmup_epochs)
+                    else:
+                        progress = (epoch - self.warmup_epochs + 1) / (
+                                    self.config.get('epochs', 55) - self.warmup_epochs)
+                        adaptive_lambda = warmup_target + progress * (self.lambda_weight - warmup_target)
+
+                    total_loss = (1 - adaptive_lambda) * cls_loss + adaptive_lambda * contrastive_loss
                 else:
-                    # Then gradually increase
-                    progress = (epoch - self.warmup_epochs + 1) / (self.config.get('epochs', 55) - self.warmup_epochs)
-                    adaptive_lambda = warmup_target + progress * (self.lambda_weight - warmup_target)
-                
-                total_loss = (1 - adaptive_lambda) * cls_loss + adaptive_lambda * dense_loss
+                    total_loss = (1 - self.lambda_weight) * cls_loss + self.lambda_weight * contrastive_loss
             else:
-                total_loss = (1 - self.lambda_weight) * cls_loss + self.lambda_weight * dense_loss
+                total_loss = cls_loss
 
             # Backward pass
             self.optimizer.zero_grad()
@@ -448,12 +505,18 @@ class DenseContrastiveTrainer:
 
             # Logging dense head gradients.
             if i % self.config.get('log_interval', 100) == 0:
-                for name, param in self.model.dense_projection_head.named_parameters():
-                    if param.grad is not None:
-                        training_analysis_metric[f'gradients/before_clip_dense_head_{name}_norm'] = param.grad.detach().data.norm(2)
-                        training_analysis_metric[f'gradients/before_clip_dense_head_{name}_mean'] = param.grad.detach().data.mean()
-                        training_analysis_metric[f'gradients/before_clip_dense_head_{name}_std'] = param.grad.detach().data.std()
-
+                if self.cl_mode == 'dense':
+                    for name, param in self.model.dense_projection_head.named_parameters():
+                        if param.grad is not None:
+                            training_analysis_metric[f'gradients/before_clip_dense_head_{name}_norm'] = param.grad.detach().data.norm(2)
+                            training_analysis_metric[f'gradients/before_clip_dense_head_{name}_mean'] = param.grad.detach().data.mean()
+                            training_analysis_metric[f'gradients/before_clip_dense_head_{name}_std'] = param.grad.detach().data.std()
+                elif self.cl_mode == 'global':
+                    for name, param in self.model.global_projection_head.named_parameters():
+                        if param.grad is not None:
+                            training_analysis_metric[f'gradients/before_clip_global_head_{name}_norm'] = param.grad.detach().data.norm(2)
+                            training_analysis_metric[f'gradients/before_clip_global_head_{name}_mean'] = param.grad.detach().data.mean()
+                            training_analysis_metric[f'gradients/before_clip_global_head_{name}_std'] = param.grad.detach().data.std()
             # Gradient clipping
             if self.config.get('grad_clip', 0) > 0:
                 grad_norm = self.get_global_grad_norm()
@@ -461,11 +524,18 @@ class DenseContrastiveTrainer:
 
             # Logging dense head gradients after gradient clipping.
             if i % self.config.get('log_interval', 100) == 0:
-                for name, param in self.model.dense_projection_head.named_parameters():
-                    if param.grad is not None:
-                        training_analysis_metric[f'gradients/after_clip_dense_head_{name}_norm'] = param.grad.detach().data.norm(2)
-                        training_analysis_metric[f'gradients/after_clip_dense_head_{name}_mean'] = param.grad.detach().data.mean()
-                        training_analysis_metric[f'gradients/after_clip_dense_head_{name}_std'] = param.grad.detach().data.std()
+                if self.cl_mode == 'dense':
+                    for name, param in self.model.dense_projection_head.named_parameters():
+                        if param.grad is not None:
+                            training_analysis_metric[f'gradients/after_clip_dense_head_{name}_norm'] = param.grad.detach().data.norm(2)
+                            training_analysis_metric[f'gradients/after_clip_dense_head_{name}_mean'] = param.grad.detach().data.mean()
+                            training_analysis_metric[f'gradients/after_clip_dense_head_{name}_std'] = param.grad.detach().data.std()
+                elif self.cl_mode == 'global':
+                    for name, param in self.model.global_projection_head.named_parameters():
+                        if param.grad is not None:
+                            training_analysis_metric[f'gradients/after_clip_global_head_{name}_norm'] = param.grad.detach().data.norm(2)
+                            training_analysis_metric[f'gradients/after_clip_global_head_{name}_mean'] = param.grad.detach().data.mean()
+                            training_analysis_metric[f'gradients/after_clip_global_head_{name}_std'] = param.grad.detach().data.std()
 
             self.optimizer.step()
 
@@ -475,8 +545,10 @@ class DenseContrastiveTrainer:
             # Update metrics
             losses.update(total_loss.item(), images[0].size(0))
             cls_losses.update(cls_loss.item(), images[0].size(0))
-            if self.lambda_weight > 0:
-                dense_losses.update(dense_loss.item(), images[0].size(0))
+            if self.cl_mode == 'dense':
+                dense_losses.update(contrastive_loss.item(), images[0].size(0))
+            elif self.cl_mode == 'global':
+                global_losses.update(contrastive_loss.item(), images[0].size(0))
             top1.update(acc1[0], images[0].size(0))
             top5.update(acc5[0], images[0].size(0))
 
@@ -489,6 +561,7 @@ class DenseContrastiveTrainer:
                 'Loss': f'{losses.avg:.4f}',
                 'ClsLoss': f'{cls_losses.avg:.4f}',
                 'DenseLoss': f'{dense_losses.avg:.4f}',
+                'GlobalLoss': f'{global_losses.avg:.4f}',
                 'Acc@1': f'{top1.avg:.2f}',
                 'LR': f'{self.optimizer.param_groups[0]["lr"]:.6f}'
             })
@@ -499,6 +572,8 @@ class DenseContrastiveTrainer:
                     'train/loss': losses.avg,
                     'train/cls_loss': cls_losses.avg,
                     'train/dense_loss': dense_losses.avg,
+                    'train/global_loss': global_losses.avg,
+                    'train/lambda': adaptive_lambda if adaptive_lambda is not None else self.lambda_weight,
                     'train/acc1': top1.avg,
                     'train/acc5': top5.avg,
                     'train/lr': self.optimizer.param_groups[0]['lr'],
@@ -512,6 +587,7 @@ class DenseContrastiveTrainer:
             'loss': losses.avg,
             'cls_loss': cls_losses.avg,
             'dense_loss': dense_losses.avg,
+            'global_loss': global_losses.avg,
             'acc1': top1.avg,
             'acc5': top5.avg
         }
@@ -685,7 +761,7 @@ class DenseContrastiveTrainer:
     def train(self):
         """Main training loop"""
         best_acc1 = 0.0
-        weight_tracker = WeightTracker()
+        weight_tracker = WeightTracker(self.cl_mode)
         weight_tracker._store_current_weights(self.model)
 
         for epoch in range(1, self.config['epochs'] + 1):
@@ -950,6 +1026,9 @@ if __name__ == "__main__":
     parser.add_argument('--no-pretrained', action="store_true", help='If specified, do not load pretrained weights')
     parser.add_argument('--model-parallel', type=bool, required=False, default=False, help='If to parallelize the model across GPUs')
     parser.add_argument('--log-interval', type=int, default=100, help='Log wandb interval')
+    parser.add_argument('--cl-mode', type=str, default='dense',
+                        choices=['dense', 'global', 'none'],
+                        help='Contrastive learning mode: dense (patch-wise), global (image-wise), or none (no CL)')
 
     args = parser.parse_args()
     # Configuration
@@ -959,6 +1038,7 @@ if __name__ == "__main__":
         'num_classes': args.num_classes,
         'dense_dim': args.dense_dim,
         'model_parallel': args.model_parallel,
+        'cl_mode': args.cl_mode,
 
         # Dataset related arguments
         'data_path': args.imagenet,  # Update this path
@@ -1002,5 +1082,5 @@ if __name__ == "__main__":
     print(f"Args:{args}")
 
     # Create trainer and start training
-    trainer = DenseContrastiveTrainer(config)
+    trainer = ContrastiveTrainer(config)
     trainer.train()

@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder
@@ -15,7 +14,6 @@ from sklearn.metrics import classification_report, confusion_matrix
 import argparse
 import logging
 
-from dense_contrastive_vit_model import DenseContrastiveViT
 
 
 class ModelEvaluator:
@@ -53,7 +51,7 @@ class ModelEvaluator:
     def load_model(self):
         """Load the trained model"""
         # Create model
-        self.model = DenseContrastiveViT(
+        self.model = ContrastiveViT(
             model_name=self.config['model_name'],
             num_classes=self.config['num_classes'],
             dense_dim=self.config.get('dense_dim', 128),
