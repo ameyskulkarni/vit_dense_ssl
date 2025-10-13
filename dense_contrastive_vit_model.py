@@ -142,10 +142,10 @@ class DenseContrastiveViT(nn.Module):
             self.load_pretrained_classification_head()
 
         # Initialize dense projection head
-        for m in self.dense_projection_head:
-            if isinstance(m, nn.Linear):
-                trunc_normal_(m.weight, std=0.02)
-                nn.init.constant_(m.bias, 0)
+        # for m in self.dense_projection_head:
+        #     if isinstance(m, nn.Linear):
+        #         trunc_normal_(m.weight, std=0.02)
+        #         nn.init.constant_(m.bias, 0)
 
     def load_pretrained_backbone_weights(self):
         """Load pretrained ViT weights from timm, excluding the classification head"""
