@@ -10,13 +10,14 @@ class DenseContrastiveLoss(nn.Module):
     """
 
     def __init__(self, temperature=0.2, queue_size=65536, momentum=0.999, correspondence_features='dense', max_patches_per_image=50,
-                 sampling_strategy='random', learnable_temp=False):
+                 sampling_strategy='random', learnable_temp=False, dense_dim=128):
         super().__init__()
         self.queue_size = queue_size
         self.momentum = momentum
         self.correspondence_features = correspondence_features
         self.max_patches_per_image = max_patches_per_image
         self.sampling_strategy = sampling_strategy  # 'random', 'diverse', or 'hardest'
+        self.dense_dim = dense_dim
 
         # Initialize temperature
         self.learnable_temp = learnable_temp
@@ -29,7 +30,7 @@ class DenseContrastiveLoss(nn.Module):
             self._fixed_temperature = temperature
 
         # Initialize memory queue
-        self.register_buffer("queue", torch.randn(queue_size, 128))
+        self.register_buffer("queue", torch.randn(queue_size, self.dense_dim))
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
         # Track image diversity in queue
